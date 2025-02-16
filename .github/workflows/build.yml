@@ -70,7 +70,7 @@ jobs:
     needs: test
     name: Build MacOS
     # TODO: Eventually, it would be better to cross-compile with `aarch64-apple-darwin`.
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -79,8 +79,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: aarch64-apple-darwin
-      - run: cargo install cross
-      - run: cross build --target aarch64-apple-darwin --release
+      - run: cargo build --target aarch64-apple-darwin --release
       - uses: actions/upload-artifact@v4
         with:
           name: ratrod_aarch64-apple-darwin
