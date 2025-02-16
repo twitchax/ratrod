@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::OnceLock};
 use anyhow::Context;
 use regex::Regex;
 use tokio::{io::{AsyncBufRead, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
-use tracing::{error, info, info_span};
+use tracing::{error, info, info_span, Instrument};
 
 use crate::{base::{Err, Preamble, Res, Sentinel, Void}, utils::{generate_challenge, handle_tcp_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge}};
 
@@ -97,9 +97,9 @@ where
     // Verify the signature.
 
     match validate_signed_challenge(challenge, signature, PUBLIC_KEY.get().unwrap()) {
-        Ok(_) => info!("🏳️ Handshake challenge completed!"),
-        Err(err) => {
-            let message = format!("Invalid key from client (supplied `{}`, but need to satisfy `{}`)", PUBLIC_KEY.get().unwrap(), err);
+        Ok(_) => info!("✅ Handshake challenge completed!"),
+        Err(_) => {
+            let message = format!("Invalid challenge signature from client (supplied `{}`)", PUBLIC_KEY.get().unwrap());
             let _ = stream.write_all(&[Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat()).await;
             let _ = stream.shutdown().await;
 
@@ -115,7 +115,7 @@ where
     T: AsyncWriteExt + Unpin,
 {
     stream.write_all(&[Sentinel::HANDSHAKE_COMPLETION, Sentinel::DELIMITER].concat()).await?;
-    info!("✔️ Handshake completed.");
+    info!("✅ Handshake completed.");
 
     Ok(())
 }
@@ -134,60 +134,63 @@ async fn handle_tcp(client: TcpStream) {
     let mut client = BufReader::new(client);
 
     let id = random_string(6);
-    let span = info_span!("handle", id = id);
-    let _span_guard = span.enter();
+    let span = info_span!("conn", id = id);
 
-    let Ok(peer_addr) = client.get_ref().peer_addr() else {
-        error!("❌ Unable to get peer address.");
-        return;
-    };
-
-    info!("✔️ Accepted connection from `{}`.", peer_addr);
-
-    // Create a challenge.
-
-    let challenge = generate_challenge();
-
-    // Handle the preamble.
-    
-    let preamble = match handle_handshake(&mut client, &challenge).await {
-        Ok(preamble) => preamble,
-        Err(err) => {
-            let chain = err.chain().collect::<Vec<_>>();
-            let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
-
-            error!("❌ Error handling connection: {}.", full_chain);
-
+    async move {
+        let Ok(peer_addr) = client.get_ref().peer_addr() else {
+            error!("❌ Unable to get peer address.");
             return;
-        }
-    };
-
-    // Connect to remote.
+        };
     
-    // This does not need to be a `BufReader` because it is immediately
-    // handed off to the pump, which will do as it may with `copy`.
-    let mut remote = match TcpStream::connect(&preamble.remote).await {
-        Ok(remote) => remote,
-        Err(err) => {
-            let message = format!("Error connecting to remote server `{}`: `{}`.", preamble.remote, err);
-            error!("❌ {}", message);
-            return;
-        }
-    };
+        info!("✅ Accepted connection from `{}`.", peer_addr);
+    
+        // Create a challenge.
+    
+        let challenge = generate_challenge();
+    
+        // Handle the preamble.
+        
+        let preamble = match handle_handshake(&mut client, &challenge).await {
+            Ok(preamble) => preamble,
+            Err(err) => {
+                let chain = err.chain().collect::<Vec<_>>();
+                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+    
+                error!("❌ Error handling connection: {}.", full_chain);
+    
+                return;
+            }
+        };
+    
+        // Connect to remote.
+        
+        // This does not need to be a `BufReader` because it is immediately
+        // handed off to the pump, which will do as it may with `copy`.
+        let mut remote = match TcpStream::connect(&preamble.remote).await {
+            Ok(remote) => remote,
+            Err(err) => {
+                let message = format!("Error connecting to remote server `{}`: `{}`.", preamble.remote, err);
+                error!("❌ {}", message);
+                return;
+            }
+        };
+    
+        info!("✅ Connected to remote server `{}`.", preamble.remote);
 
-    info!("✔️ Connected to remote server `{}`.", preamble.remote);
-
-    // Handle the TCP pump.
-
-    match handle_tcp_pump(&mut client.into_inner(), &mut remote).await {
-        Ok(_) => info!("✔️ Connection closed."),
-        Err(err) => {
-            let chain = err.chain().collect::<Vec<_>>();
-            let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
-
-            error!("❌ Error handling the pump: `{}`.", full_chain);
-        }
-    };
+        info!("⛽ Pumping data between client and remote ...");
+    
+        // Handle the TCP pump.
+    
+        match handle_tcp_pump(&mut client.into_inner(), &mut remote).await {
+            Ok(_) => info!("✅ Connection closed."),
+            Err(err) => {
+                let chain = err.chain().collect::<Vec<_>>();
+                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+    
+                error!("❌ Error handling the pump: `{}`.", full_chain);
+            }
+        };
+    }.instrument(span).await;
 }
 
 #[cfg(test)]

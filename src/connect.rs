@@ -1,9 +1,9 @@
 use std::{borrow::Cow, sync::OnceLock};
 
 use tokio::{io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
-use tracing::{error, info};
+use tracing::{error, info, info_span, Instrument};
 
-use crate::{base::{Err, Res, Sentinel, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, read_to_next_delimiter, sign_challenge}};
+use crate::{base::{Err, Res, Sentinel, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
 
 static PRIVATE_KEY: OnceLock<String> = OnceLock::new();
 
@@ -22,6 +22,7 @@ pub async fn start(server: String, tunnel: String, private_key: String) -> Void 
 
     // Finally, start the server.
 
+    info!("📻 Listening on `{}`, and routing through `{}` to `{}` ...", BIND_ADDRESS.get().unwrap(), CONNECT_ADDRESS.get().unwrap(), REMOTE_ADDRESS.get().unwrap());
     run_tcp_server().await?;
 
     Ok(())   
@@ -50,6 +51,8 @@ where
         return Err(Err::msg("Handshake failed (completion message had data)"));
     }
 
+    info!("✅ Challenge accepted ...");
+
     Ok(())
 }
 
@@ -58,6 +61,8 @@ where
     T: AsyncBufRead + AsyncWrite + Unpin,
 {
     let challenge = handle_handshake_response(stream).await?;
+    info!("🚧 Handshake challenge received ...");
+
     let signature = sign_challenge(&challenge, PRIVATE_KEY.get().unwrap())?;
     stream.write_all(&[Sentinel::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Sentinel::DELIMITER].concat()).await?;
 
@@ -72,7 +77,7 @@ where
 {
     let preamble = prepare_preamble(REMOTE_ADDRESS.get().unwrap())?;
     stream.write_all(&preamble).await?;
-    info!("✔️ Sent preamble to server ...");
+    info!("✅ Sent preamble to server ...");
 
     Ok(())
 }
@@ -84,11 +89,11 @@ where
     let buf = read_to_next_delimiter(stream).await?;
 
     if buf.starts_with(Sentinel::HANDSHAKE_COMPLETION) {
-        info!("✔️ Handshake successful: connection established!");
-
         Ok(vec![])
     } else if buf.starts_with(Sentinel::HANDSHAKE_CHALLENGE) {
-        info!("🚧 Handshake challenge received ...");
+        if !buf.starts_with(Sentinel::HANDSHAKE_CHALLENGE) {
+            return Err(Err::msg("Handshake failed (challenge message did not start with the expected sentinel)"));
+        }
 
         let challenge = buf[Sentinel::SIZE..].to_vec();
         Ok(challenge)
@@ -116,29 +121,46 @@ async fn run_tcp_server() -> Void {
 }
 
 async fn handle_tcp(mut local: TcpStream) -> Void {
-    // Connect to the server.
-    let mut remote = BufReader::new(remote_connect_tcp().await?);
+    let id = random_string(6);
+    let span = info_span!("conn", id = id);
 
-    // Handle the handshake.
-    handle_handshake(&mut remote).await?;
+    async move {
+        // Connect to the server.
+        let mut remote = BufReader::new(remote_connect_tcp().await?);
 
-    // Handle the TCP pump.
-    match handle_tcp_pump(&mut local, &mut remote.into_inner()).await {
-        Ok(_) => info!("✔️ Connection closed."),
-        Err(err) => {
-            let chain = err.chain().collect::<Vec<_>>();
-            let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+        // Handle the handshake.
+        match handle_handshake(&mut remote).await {
+            Ok(_) => info!("✅ Handshake successful: connection established!"),
+            Err(err) => {
+                let chain = err.chain().collect::<Vec<_>>();
+                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
 
-            error!("❌ Error handling the pump: `{}`.", full_chain);
-        }
-    };
+                error!("❌ Error handling the handshake: {}.", full_chain);
+                return Err(err);
+            }
+        };
 
-    Ok(())
+        info!("⛽ Pumping data between client and remote ...");
+
+        // Handle the TCP pump.
+        match handle_tcp_pump(&mut local, &mut remote.into_inner()).await {
+            Ok(_) => info!("✅ Connection closed."),
+            Err(err) => {
+                let chain = err.chain().collect::<Vec<_>>();
+                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+
+                error!("❌ Error handling the pump: {}.", full_chain);
+                return Err(err);
+            }
+        };
+
+        Ok(())
+    }.instrument(span).await
 }
 
 async fn remote_connect_tcp() -> Res<TcpStream> {
     let stream = TcpStream::connect(CONNECT_ADDRESS.get().unwrap()).await?;
-    info!("✔️ Connected to server `{}` ...", CONNECT_ADDRESS.get().unwrap());
+    info!("✅ Connected to server `{}` ...", CONNECT_ADDRESS.get().unwrap());
 
     Ok(stream)
 }

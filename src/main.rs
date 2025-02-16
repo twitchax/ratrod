@@ -14,6 +14,12 @@ pub mod connect;
 async fn main() {
     let args = Args::parse();
 
+    let level = if args.verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
     tracing_subscriber::fmt()
         .with_ansi(true)
         .with_level(true)
@@ -22,6 +28,7 @@ async fn main() {
         .with_thread_ids(false)
         .with_thread_names(false)
         .with_thread_names(false)
+        .with_max_level(level)
         .init();
 
     let result = match args.command {
@@ -46,8 +53,6 @@ async fn main() {
             serve::start(bind, pair.public_key, remote_regex).await
         }
         Some(Command::Connect { server, tunnel, key }) => {
-            info!("Connecting to server `{}` ...", server);
-
             connect::start(server, tunnel, key).await
         }
         Some(Command::GenerateKeypair) => {
@@ -68,12 +73,19 @@ async fn main() {
 }
 
 /// Tunnels a local port to a remote server, which then redirects the
-/// traffic to the same port on the server.
+/// traffic to a specified remote host.
+/// 
+/// A (likely semi-inefficient) TCP tunneler that uses public/private key authentication without subsequent encryption.
+/// Basically, it's `ssh -L`, but without the encryption.  This is useful for tunneling through a machine that doesn't support SSH.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Flag that specifies verbose logging.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand, PartialEq, Debug)]

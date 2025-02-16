@@ -6,6 +6,7 @@ use rand::{distr::Alphanumeric, Rng};
 use ring::{rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey}};
 use sha2::{Digest, Sha256};
 use tokio::{io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite}, net::TcpStream};
+use tracing::debug;
 
 use crate::base::{Base64KeyPair, Err, Preamble, Res, Sentinel, TunnelDefinition, Void};
 
@@ -60,11 +61,16 @@ pub fn generate_challenge() -> [u8; Sentinel::CHALLENGE_SIZE] {
 }
 
 pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<[u8; Sentinel::SIGNATURE_SIZE]> {
+    debug!("Challenge: `{:?}`", challenge);
+    
     let private_key = BASE64_URL_SAFE_NO_PAD.decode(private_key).context("Could not decode private key")?;
+    debug!("Signing challenge with private key: {:?}", &private_key);
 
     let key_pair = Ed25519KeyPair::from_pkcs8(&private_key).map_err(|_| Err::msg("Invalid private key"))?;
+    debug!("Key pair: {:?}", key_pair);
 
     let signature = key_pair.sign(challenge).as_ref()[..Sentinel::SIGNATURE_SIZE].try_into().map_err(|_| Err::msg("Invalid signature length"))?;
+    debug!("Signature: {:?}", &signature);
 
     Ok(signature)
 }
@@ -195,18 +201,13 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (up_result, down_result) = tokio::join!(
-        tokio::io::copy(reader_left, writer_right),
-        tokio::io::copy(reader_right, writer_left)
+    let result = tokio::select!(
+        r = tokio::io::copy(reader_left, writer_right) => r,
+        r = tokio::io::copy(reader_right, writer_left) => r
     );
 
-    if let Err(err) = up_result {
-        let message = format!("Error forwarding data from client to remote: `{}`", err);
-        return Err(Err::msg(message));
-    }
-
-    if let Err(err) = down_result {
-        let message = format!("Error forwarding data from client to socket: `{}`", err);
+    if let Err(err) = result {
+        let message = format!("Error during TCP pumping: `{}`", err);
         return Err(Err::msg(message));
     }
 

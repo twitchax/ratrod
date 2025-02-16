@@ -10,6 +10,7 @@ impl Sentinel {
     pub const BUFFER_SIZE: usize = 4096;
     pub const CHALLENGE_SIZE: usize = 32;
     pub const SIGNATURE_SIZE: usize = 64;
+    pub const PRIVATE_KEY_SIZE: usize = 83;
 
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
 
