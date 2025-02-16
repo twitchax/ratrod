@@ -1,51 +1,221 @@
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
-use tracing::info;
+use std::{borrow::Cow, sync::OnceLock};
 
-use crate::{base::{Err, Res, Sentinel}, utils::prepare_preamble};
+use tokio::{io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
+use tracing::{error, info};
 
-pub async fn start(server: String, remote: String, key: String) -> Res<()> {
-    let tab = " ";
+use crate::{base::{Err, Res, Sentinel, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, read_to_next_delimiter, sign_challenge}};
 
-    // Check that key and remote, together, are no more than PREAMBLE_SIZE - 3 * DELIMITER_SIZE.
+static PRIVATE_KEY: OnceLock<String> = OnceLock::new();
 
-    if key.len() + remote.len() > Sentinel::PREAMBLE_SIZE - 3 * Sentinel::PREAMBLE_SIZE {
-        let message = format!("Key and remote together are too long (must be less than PREAMBLE_SIZE [{}] - 3 * DELIMITER_SIZE [{}] bytes)", Sentinel::PREAMBLE_SIZE, Sentinel::PREAMBLE_SIZE);
-        return Err(Err::msg(message));
-    }
+static BIND_ADDRESS: OnceLock<String> = OnceLock::new();
+static CONNECT_ADDRESS: OnceLock<String> = OnceLock::new();
+static REMOTE_ADDRESS: OnceLock<String> = OnceLock::new();
 
-    // Connect to the server.
+pub async fn start(server: String, tunnel: String, private_key: String) -> Void {
+    // Compute the tunnel definition.
 
-    let mut stream = TcpStream::connect(&server).await?;
-    info!("{}✔️ Connected to server `{}` ...", tab, server);
+    let tunnel_definition = parse_tunnel_definition(&tunnel)?;
 
-    // Send the preamble.
+    // Prepare the globals.
 
-    let preamble = prepare_preamble(&key, &remote).await?;
-    stream.write_all(&preamble).await?;
-    info!("{}✔️ Sent preamble to server ...", tab);
+    prepare_globals(private_key, tunnel_definition.bind_address, server, tunnel_definition.remote_address)?;
 
-    // Await the handshake response.
+    // Finally, start the server.
 
-    let mut buf = [0; 8];
-    stream.read_exact(&mut buf).await?;
+    run_tcp_server().await?;
 
-    if buf == Sentinel::PREAMBLE_COMPLETION {
-        info!("{}✔️ Handshake successful: connection established!", tab);
-    } else if buf == Sentinel::ERROR_INVALID_KEY {
-        let mut message = String::new();
-        let _ = stream.read_to_string(&mut message).await;
+    Ok(())   
+}
 
-        return Err(Err::msg(format!("Handshake failed (invalid key): {}", message)));
-    } else if buf == Sentinel::ERROR_INVALID_HOST {
-        let mut message = String::new();
-        let _ = stream.read_to_string(&mut message).await;
-
-        return Err(Err::msg(format!("Handshake failed (invalid host): {}", message)));
-    } else {
-        return Err(Err::msg("Handshake failed (unknown error)"));
-    }
-    
-
+fn prepare_globals<'a, 'b, 'c>(key: impl Into<Cow<'a, str>>, bind_address: impl Into<Cow<'b, str>>, connect_address: impl Into<Cow<'c, str>>, remote_address: impl Into<Cow<'c, str>>) -> Void {
+    PRIVATE_KEY.get_or_init(|| key.into().to_string());
+    BIND_ADDRESS.get_or_init(|| bind_address.into().to_string());
+    CONNECT_ADDRESS.get_or_init(|| connect_address.into().to_string());
+    REMOTE_ADDRESS.get_or_init(|| remote_address.into().to_string());
 
     Ok(())
+}
+
+async fn handle_handshake<T>(stream: &mut T) -> Void
+where 
+    T: AsyncBufRead + AsyncWrite + Unpin,
+{
+    send_preamble(stream).await?;
+    handle_challenge(stream).await?;
+    
+    // Await the handshake response.
+
+    let data = handle_handshake_response(stream).await?;
+    if !data.is_empty() {
+        return Err(Err::msg("Handshake failed (completion message had data)"));
+    }
+
+    Ok(())
+}
+
+async fn handle_challenge<T>(stream: &mut T) -> Void
+where 
+    T: AsyncBufRead + AsyncWrite + Unpin,
+{
+    let challenge = handle_handshake_response(stream).await?;
+    let signature = sign_challenge(&challenge, PRIVATE_KEY.get().unwrap())?;
+    stream.write_all(&[Sentinel::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Sentinel::DELIMITER].concat()).await?;
+
+    info!("⏳ Awaiting challenge validation ...");
+
+    Ok(())
+}
+
+async fn send_preamble<T>(stream: &mut T) -> Void
+where 
+    T: AsyncWrite + Unpin,
+{
+    let preamble = prepare_preamble(REMOTE_ADDRESS.get().unwrap())?;
+    stream.write_all(&preamble).await?;
+    info!("✔️ Sent preamble to server ...");
+
+    Ok(())
+}
+
+async fn handle_handshake_response<T>(stream: &mut T) -> Res<Vec<u8>>
+where 
+    T: AsyncBufRead + Unpin,
+{
+    let buf = read_to_next_delimiter(stream).await?;
+
+    if buf.starts_with(Sentinel::HANDSHAKE_COMPLETION) {
+        info!("✔️ Handshake successful: connection established!");
+
+        Ok(vec![])
+    } else if buf.starts_with(Sentinel::HANDSHAKE_CHALLENGE) {
+        info!("🚧 Handshake challenge received ...");
+
+        let challenge = buf[Sentinel::SIZE..].to_vec();
+        Ok(challenge)
+    } else if buf.starts_with(Sentinel::ERROR_INVALID_KEY) {
+        let message = String::from_utf8(buf[Sentinel::SIZE..].to_vec())?;
+
+        Err(Err::msg(format!("Handshake failed (invalid key): {}", message)))
+    } else if buf.starts_with(Sentinel::ERROR_INVALID_HOST) {
+        let message = String::from_utf8(buf[Sentinel::SIZE..].to_vec())?;
+
+        Err(Err::msg(format!("Handshake failed (invalid host): {}", message)))
+    } else {
+        Err(Err::msg("Handshake failed (unknown error)"))
+    }
+}
+
+async fn run_tcp_server() -> Void {
+    let listener = TcpListener::bind(BIND_ADDRESS.get().unwrap()).await?;
+
+    loop {
+        let (socket, _) = listener.accept().await?;
+
+        tokio::spawn(handle_tcp(socket));
+    }
+}
+
+async fn handle_tcp(mut local: TcpStream) -> Void {
+    // Connect to the server.
+    let mut remote = BufReader::new(remote_connect_tcp().await?);
+
+    // Handle the handshake.
+    handle_handshake(&mut remote).await?;
+
+    // Handle the TCP pump.
+    match handle_tcp_pump(&mut local, &mut remote.into_inner()).await {
+        Ok(_) => info!("✔️ Connection closed."),
+        Err(err) => {
+            let chain = err.chain().collect::<Vec<_>>();
+            let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+
+            error!("❌ Error handling the pump: `{}`.", full_chain);
+        }
+    };
+
+    Ok(())
+}
+
+async fn remote_connect_tcp() -> Res<TcpStream> {
+    let stream = TcpStream::connect(CONNECT_ADDRESS.get().unwrap()).await?;
+    info!("✔️ Connected to server `{}` ...", CONNECT_ADDRESS.get().unwrap());
+
+    Ok(stream)
+}
+
+#[cfg(test)]
+pub mod tests {
+    use crate::utils::tests::MockStream;
+
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_prepare_globals() {
+        let key = "key";
+        let bind_address = "bind_address";
+        let connect_address = "connect_address";
+        let remote_address = "remote_address";
+
+        prepare_globals(key, bind_address, connect_address, remote_address).unwrap();
+
+        assert_eq!(PRIVATE_KEY.get().unwrap(), key);
+        assert_eq!(BIND_ADDRESS.get().unwrap(), bind_address);
+        assert_eq!(CONNECT_ADDRESS.get().unwrap(), connect_address);
+        assert_eq!(REMOTE_ADDRESS.get().unwrap(), remote_address);
+    }
+
+    #[tokio::test]
+    async fn test_send_preamble() {
+        let key = "key";
+        let remote_address = "remote_address";
+        let expected = prepare_preamble(remote_address).unwrap();
+
+        prepare_globals(key, "bind_address", "connect_address", remote_address).unwrap();
+
+        let mut stream = MockStream::new(vec![], vec![]);
+        
+        send_preamble(&mut stream).await.unwrap();
+        
+        assert_eq!(stream.write, expected);
+    }
+
+    #[tokio::test]
+    async fn test_handle_handshake_response() {
+        let mut stream = BufReader::new(MockStream::new([Sentinel::HANDSHAKE_COMPLETION, Sentinel::DELIMITER].concat(), vec![]));
+
+        handle_handshake_response(&mut stream).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_failed_key_handshake_response() {
+        let message = "foo";
+        let mut stream = BufReader::new(MockStream::new([Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat(), vec![]));
+
+        let result = handle_handshake_response(&mut stream).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), format!("Handshake failed (invalid key): {}", message));
+    }
+
+    #[tokio::test]
+    async fn handle_failed_host_handshake_response() {
+        let message = "foo";
+        let mut stream = BufReader::new(MockStream::new([Sentinel::ERROR_INVALID_HOST, message.as_bytes(), Sentinel::DELIMITER].concat(), vec![]));
+
+        let result = handle_handshake_response(&mut stream).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), format!("Handshake failed (invalid host): {}", message));
+    }
+
+    #[tokio::test]
+    async fn handle_failed_unknown_handshake_response() {
+        let mut stream = BufReader::new(MockStream::new([&[0x00], Sentinel::DELIMITER].concat(), vec![]));
+
+        let result = handle_handshake_response(&mut stream).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), "Handshake failed (unknown error)");
+    }
 }

@@ -2,48 +2,126 @@ use std::{borrow::Cow, sync::OnceLock};
 
 use anyhow::Context;
 use regex::Regex;
-use tokio::{io::{AsyncRead, AsyncWriteExt}, net::{TcpListener, TcpStream}};
+use tokio::{io::{AsyncBufRead, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
 use tracing::{error, info, info_span};
 
-use crate::{base::{Err, Preamble, Res, Sentinel}, utils::{hash_key, process_preamble, random_string, verify_key}};
+use crate::{base::{Err, Preamble, Res, Sentinel, Void}, utils::{generate_challenge, handle_tcp_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge}};
 
-static KEY_SALT: OnceLock<String> = OnceLock::new();
-static KEY_HASH: OnceLock<String> = OnceLock::new();
-static HOST_REGEX: OnceLock<Regex> = OnceLock::new();
+static PUBLIC_KEY: OnceLock<String> = OnceLock::new();
 
-pub async fn start(bind: String, key: String, host_regex: String) -> Res<()> {
+static REMOTE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+static BIND_ADDRESS: OnceLock<String> = OnceLock::new();
+
+pub async fn start(bind_address: String, public_key: String, remote_regex: String) -> Void {
     // Prepare the globals.
 
-    prepare_globals(key, host_regex)?;
+    prepare_globals(public_key, remote_regex, bind_address)?;
 
     // Finally, start the server.
 
-    run_tcp_server(bind).await?;
+    run_tcp_server().await?;
 
     Ok(())
 }
 
-fn prepare_globals<'a, 'b>(key: impl Into<Cow<'a, str>>, host_regex: impl Into<Cow<'b, str>>) -> Res<()> {
-    // First, make sure the key salt and hash are set.
+fn prepare_globals<'a, 'b, 'c>(public_key: impl Into<Cow<'a, str>>, remote_regex: impl Into<Cow<'b, str>>, bind_address: impl Into<Cow<'c, str>>) -> Void {
+    PUBLIC_KEY.get_or_init(|| public_key.into().to_string() );
 
-    let salt = random_string(30);
-    KEY_SALT.get_or_init(|| salt );
+    let remote_regex = Regex::new(remote_regex.into().as_ref()).context("Unable to parse the supplied `host_regex`")?;
+    REMOTE_REGEX.get_or_init(|| remote_regex );
 
-    // Next make sure the key hash is set.
-
-    let hash = hash_key(key.into().as_ref(), KEY_SALT.get().unwrap());
-    KEY_HASH.get_or_init(|| hash );
-
-    // Next, make sure the host regex is set.
-
-    let host_regex = Regex::new(host_regex.into().as_ref()).context("Unable to parse the supplied `host_regex`")?;
-    HOST_REGEX.get_or_init(|| host_regex );
+    BIND_ADDRESS.get_or_init(|| bind_address.into().to_string() );
 
     Ok(())
 }
 
-async fn run_tcp_server(bind: String) -> Res<()> {
-    let listener = TcpListener::bind(bind).await?;
+async fn handle_handshake<T>(stream: &mut T, challenge: &[u8]) -> Res<Preamble>
+where 
+    T: AsyncBufRead + AsyncWriteExt + Unpin,
+{
+    let preamble = process_preamble(stream).await?;
+    
+    verify_preamble_host(stream, &preamble).await?;
+    handle_and_validate_key_challenge(stream, challenge).await?;
+    complete_handshake(stream).await?;
+
+    Ok(preamble)
+}
+
+async fn verify_preamble_host<T>(stream: &mut T, preamble: &Preamble) -> Void
+where
+    T: AsyncWriteExt + Unpin,
+{
+    if !REMOTE_REGEX.get().unwrap().is_match(&preamble.remote) {
+        // Attempt to let the client know that the host is invalid.
+        let message = format!("Invalid host from client (supplied `{}`, but need to satisfy `{}`)", preamble.remote, REMOTE_REGEX.get().unwrap());
+        let _ = stream.write_all(&[Sentinel::ERROR_INVALID_HOST, message.as_bytes(), Sentinel::DELIMITER].concat()).await;
+        let _ = stream.shutdown().await;
+
+        return Err(Err::msg(message));
+    }
+
+    Ok(())
+}
+
+async fn handle_and_validate_key_challenge<T>(stream: &mut T, challenge: &[u8]) -> Void
+where
+    T: AsyncBufRead + AsyncWriteExt + Unpin,
+{
+    info!("🚧 Sending handshake challenge to client ...");
+
+    stream.write_all(&[Sentinel::HANDSHAKE_CHALLENGE, challenge, Sentinel::DELIMITER].concat()).await?;
+
+    // Wait for the client to respond.
+
+    let signature_response = read_to_next_delimiter(stream).await?;
+    let (signature_sentinel, signature) = signature_response.split_at(Sentinel::SIZE);
+
+    if !signature_sentinel.eq(Sentinel::HANDSHAKE_CHALLENGE_RESPONSE) {
+        let message = "Invalid handshake response";
+        let _ = stream.write_all(&[Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat()).await;
+        let _ = stream.shutdown().await;
+
+        return Err(Err::msg(message));
+    }
+
+    if signature.len() != Sentinel::SIGNATURE_SIZE {
+        let message = "Invalid signature length";
+        let _ = stream.write_all(&[Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat()).await;
+        let _ = stream.shutdown().await;
+
+        return Err(Err::msg(message));
+    }
+
+    // Verify the signature.
+
+    match validate_signed_challenge(challenge, signature, PUBLIC_KEY.get().unwrap()) {
+        Ok(_) => info!("🏳️ Handshake challenge completed!"),
+        Err(err) => {
+            let message = format!("Invalid key from client (supplied `{}`, but need to satisfy `{}`)", PUBLIC_KEY.get().unwrap(), err);
+            let _ = stream.write_all(&[Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat()).await;
+            let _ = stream.shutdown().await;
+
+            return Err(Err::msg(message));
+        }
+    }
+
+    Ok(())
+}
+
+async fn complete_handshake<T>(stream: &mut T) -> Void
+where
+    T: AsyncWriteExt + Unpin,
+{
+    stream.write_all(&[Sentinel::HANDSHAKE_COMPLETION, Sentinel::DELIMITER].concat()).await?;
+    info!("✔️ Handshake completed.");
+
+    Ok(())
+}
+
+async fn run_tcp_server() -> Void {
+    let listener = TcpListener::bind(BIND_ADDRESS.get().unwrap()).await?;
 
     loop {
         let (socket, _) = listener.accept().await?;
@@ -52,27 +130,33 @@ async fn run_tcp_server(bind: String) -> Res<()> {
     }
 }
 
-async fn handle_tcp(mut client: TcpStream) {
+async fn handle_tcp(client: TcpStream) {
+    let mut client = BufReader::new(client);
+
     let id = random_string(6);
     let span = info_span!("handle", id = id);
     let _span_guard = span.enter();
 
-    let Ok(peer_addr) = client.peer_addr() else {
-        error!("Unable to get peer address.");
+    let Ok(peer_addr) = client.get_ref().peer_addr() else {
+        error!("❌ Unable to get peer address.");
         return;
     };
 
     info!("✔️ Accepted connection from `{}`.", peer_addr);
 
+    // Create a challenge.
+
+    let challenge = generate_challenge();
+
     // Handle the preamble.
     
-    let preamble = match handle_preamble(&mut client).await {
+    let preamble = match handle_handshake(&mut client, &challenge).await {
         Ok(preamble) => preamble,
         Err(err) => {
             let chain = err.chain().collect::<Vec<_>>();
             let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
 
-            error!("Error handling connection: {}.", full_chain);
+            error!("❌ Error handling connection: {}.", full_chain);
 
             return;
         }
@@ -80,170 +164,140 @@ async fn handle_tcp(mut client: TcpStream) {
 
     // Connect to remote.
     
-    let remote = match TcpStream::connect(&preamble.host).await {
+    // This does not need to be a `BufReader` because it is immediately
+    // handed off to the pump, which will do as it may with `copy`.
+    let mut remote = match TcpStream::connect(&preamble.remote).await {
         Ok(remote) => remote,
         Err(err) => {
-            let message = format!("Error connecting to remote server `{}`: `{}`.", preamble.host, err);
-            error!("{}", message);
+            let message = format!("Error connecting to remote server `{}`: `{}`.", preamble.remote, err);
+            error!("❌ {}", message);
             return;
         }
     };
 
-    info!("✔️ Connected to remote server `{}`.", preamble.host);
+    info!("✔️ Connected to remote server `{}`.", preamble.remote);
 
     // Handle the TCP pump.
 
-    match handle_tcp_pump(client, remote).await {
+    match handle_tcp_pump(&mut client.into_inner(), &mut remote).await {
         Ok(_) => info!("✔️ Connection closed."),
         Err(err) => {
             let chain = err.chain().collect::<Vec<_>>();
             let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
 
-            error!("Error handling the pump: `{}`.", full_chain);
+            error!("❌ Error handling the pump: `{}`.", full_chain);
         }
     };
 }
 
-async fn handle_tcp_pump(client: TcpStream, remote: TcpStream) -> Res<()> {
-    let (mut remote_reader, mut remote_writer) = remote.into_split();
-    let (mut socket_reader, mut socket_writer) = client.into_split();
-    let (up_result, down_result) = tokio::join!(
-        tokio::io::copy(&mut socket_reader, &mut remote_writer),
-        tokio::io::copy(&mut remote_reader, &mut socket_writer)
-    );
-
-    if let Err(err) = up_result {
-        let message = format!("Error forwarding data from socket to remote: `{}`", err);
-        return Err(Err::msg(message));
-    }
-
-    if let Err(err) = down_result {
-        let message = format!("Error forwarding data from remote to socket: `{}`", err);
-        return Err(Err::msg(message));
-    }
-
-    Ok(())
-}
-
-async fn handle_preamble<T>(socket: &mut T) -> Res<Preamble>
-where 
-    T: AsyncRead + AsyncWriteExt + Unpin,
-{
-    // Get the preamble.
-
-    let preamble = process_preamble(socket).await?;
-
-    // Check the key.
-
-    if !verify_key(&preamble.key, KEY_SALT.get().unwrap(), KEY_HASH.get().unwrap()) {
-        // Attempt to let the client know that the key is invalid.
-        let message = format!("Invalid key from client (supplied `{}`)", preamble.key);
-        let _ = socket.write_all(Sentinel::ERROR_INVALID_KEY).await;
-        let _ = socket.write_all(message.as_bytes()).await;
-        let _ = socket.shutdown().await;
-
-        return Err(Err::msg(message));
-    }
-
-    // Check the host.
-
-    if !HOST_REGEX.get().unwrap().is_match(&preamble.host) {
-        // Attempt to let the client know that the host is invalid.
-        let message = format!("Invalid host from client (supplied `{}`, but need to satisfy `{}`)", preamble.host, HOST_REGEX.get().unwrap());
-        let _ = socket.write_all(Sentinel::ERROR_INVALID_HOST).await;
-        let _ = socket.write_all(message.as_bytes()).await;
-        let _ = socket.shutdown().await;
-
-        return Err(Err::msg(message));
-    }
-
-    // Let the client know that the connection is established.
-
-    socket.write_all(Sentinel::PREAMBLE_COMPLETION).await?;
-    info!("✔️ Preamble completion sent to client.");
-
-    Ok(preamble)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{io, pin::Pin, task::Poll};
-    use core::task::Context;
+    use pretty_assertions::assert_eq;
 
-    use tokio::io::{AsyncWrite, ReadBuf};
-
-    use crate::utils::prepare_preamble;
+    use crate::utils::{generate_key_pair, prepare_preamble, sign_challenge, tests::MockStream};
 
     use super::*;
-    
-    struct MockStream {
-        pub read: Vec<u8>,
-        pub write: Vec<u8>,
-    }
 
-    impl AsyncRead for MockStream {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            let slice = std::pin::pin!(self.get_mut().read.as_slice());
-            
-            slice.poll_read(cx, buf)
-        }
-    }
+    #[test]
+    fn test_prepare_globals() {
+        prepare_globals("test_key", ".*", "foo").unwrap();
 
-    impl AsyncWrite for MockStream {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            unsafe { self.map_unchecked_mut(|s| &mut s.write).poll_write(cx, buf) }
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            unsafe { self.map_unchecked_mut(|s| &mut s.write).poll_flush(cx) }
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            unsafe { self.map_unchecked_mut(|s| &mut s.write).poll_shutdown(cx) }
-        }
+        assert_eq!(PUBLIC_KEY.get().unwrap().len(), 8);
+        assert_eq!(REMOTE_REGEX.get().unwrap().as_str(), ".*");
+        assert_eq!(BIND_ADDRESS.get().unwrap(), "foo");
     }
 
     #[test]
     fn test_can_set_host_regex() {
-        prepare_globals("", ".*").unwrap();
+        prepare_globals("", ".*", "").unwrap();
     }
 
     #[test]
     fn test_can_hash_key() {
-        prepare_globals("test_key", ".*").unwrap();
+        prepare_globals("test_key", ".*", "").unwrap();
     }
 
     #[test]
     fn test_cannot_set_unparsable_host_regex() {
-        assert!(prepare_globals("test_key", "[a-z").is_err());
+        assert!(prepare_globals("test_key", "[a-z", "").is_err());
     }
 
     #[tokio::test]
-    async fn test_can_handle_generic_preamble() {
+    async fn test_can_handle_handshake() {
+        let keypair = generate_key_pair().unwrap();
+        let remote = "test_remote";
+
+        // We need to compute the total stream from the client back to the server.
+        let challenge = generate_challenge();
+        let signature = sign_challenge(&challenge, &keypair.private_key).unwrap();
+
+        let client_to_server = [&prepare_preamble(remote).unwrap(), Sentinel::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Sentinel::DELIMITER].concat();
+
+        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+
+        prepare_globals(keypair.public_key, ".*", "").unwrap();
+        let preamble = handle_handshake(&mut stream, &challenge).await.unwrap();
+
+        assert_eq!(preamble.remote, remote);
+    }
+
+    #[tokio::test]
+    async fn test_can_disallow_wrong_challenge_response() {
+        let remote = "test_remote";
+        let error_message = "Invalid handshake response";
+
+        let client_to_server = [&prepare_preamble(remote).unwrap(), Sentinel::HANDSHAKE_COMPLETION, random_string(64).as_bytes(), Sentinel::DELIMITER].concat();
+
+        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+
+        prepare_globals("another", ".*", "").unwrap();
+        let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
+
+        assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
+
+        let expected_write_stream = [Sentinel::ERROR_INVALID_KEY, error_message.as_bytes(), Sentinel::DELIMITER].concat();
+
+        let skip = Sentinel::SIZE + Sentinel::CHALLENGE_SIZE + Sentinel::SIZE;
+        assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
+    }
+
+    #[tokio::test]
+    async fn test_can_disallow_wrong_key_length() {
+        let remote = "test_remote";
+        let error_message = "Invalid signature length";
+
+        let client_to_server = [&prepare_preamble(remote).unwrap(), Sentinel::HANDSHAKE_CHALLENGE_RESPONSE, random_string(32).as_bytes(), Sentinel::DELIMITER].concat();
+
+        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+
+        prepare_globals("another", ".*", "").unwrap();
+        let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
+
+        assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
+
+        let expected_write_stream = [Sentinel::ERROR_INVALID_KEY, error_message.as_bytes(), Sentinel::DELIMITER].concat();
+
+        let skip = Sentinel::SIZE + Sentinel::CHALLENGE_SIZE + Sentinel::SIZE;
+        assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
+    }
+
+    #[tokio::test]
+    async fn test_can_disallow_bad_host() {
         let key = "test_key";
-        let host = "test_host";
+        let remote = "test_remote";
+        let error_message = "Invalid host from client (supplied `test_remote`, but need to satisfy `hots`)";
 
-        let client_to_server = prepare_preamble(key, host).await.unwrap();
+        let client_to_server = prepare_preamble(remote).unwrap();
 
-        let mut stream = MockStream {
-            read: client_to_server,
-            write: Vec::new(),
-        };
+        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
 
-        prepare_globals(key.to_string(), ".*").unwrap();
-        let preamble = handle_preamble(&mut stream).await.unwrap();
+        prepare_globals(key, "hots", "").unwrap();
+        let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
 
-        assert_eq!(preamble.key, key);
-        assert_eq!(preamble.host, host);
+        assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
 
-        assert_eq!(stream.write, Sentinel::PREAMBLE_COMPLETION);
+        let expected_write_stream = [Sentinel::ERROR_INVALID_HOST, error_message.as_bytes(), Sentinel::DELIMITER].concat();
+
+        assert_eq!(stream.get_ref().write, expected_write_stream);
     }
 }

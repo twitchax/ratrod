@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ratrod'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ratrod",
+                    "--package=ratrod"
+                ],
+                "filter": {
+                    "name": "ratrod",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ratrod'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ratrod",
+                    "--package=ratrod",
+                ],
+                "filter": {
+                    "name": "ratrod",
+                    "kind": "bin",
+                }
+            },
+            "args": ["test_can_disallow_wrong_key_length"],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
