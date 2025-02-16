@@ -29,7 +29,10 @@ jobs:
       - run: cargo install cargo-llvm-cov
       - run: cargo install cargo-nextest
       - run: cargo llvm-cov nextest --all-features --workspace --lcov --output-path coverage.lcov
-      - uses: codecov/codecov-action@v2
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: twitchax/ratrod
 
   build_linux:
     needs: test
