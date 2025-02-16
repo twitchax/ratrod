@@ -1,9 +1,87 @@
-# For reference:
-# - uses: dtolnay/rust-toolchain@stable
-#   with:
-#     components: llvm-tools-preview
-# - uses: taiki-e/install-action@cargo-llvm-cov
-# - uses: taiki-e/install-action@nextest
+on: [push]
 
-# - name: Collect coverage data
-#   run: cargo llvm-cov nextest
+name: Build and Test
+
+jobs:
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-nextest
+      - run: cargo nextest run
+
+  codecov:
+    needs: test
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: "true"
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin
+        continue-on-error: true
+      - run: cargo install cargo-llvm-cov
+      - run: cargo install cargo-nextest
+      - run: cargo llvm-cov nextest --all-features --workspace --lcov --output-path coverage.lcov
+      - uses: codecov/codecov-action@v2
+
+  build_windows:
+    needs: test
+    name: Build Windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: sudo apt-get install mingw-w64
+      - uses: actions-rs/toolchain@v1
+        with:
+          target: x86_64-pc-windows-gnu
+          override: true
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target x86_64-pc-windows-gnu --release
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ratrod_x86_64-pc-windows-gnu
+          path: target/x86_64-pc-windows-gnu/release/ratrod.exe
+
+  build_linux:
+    needs: test
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+          override: true
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target x86_64-unknown-linux-gnu --release
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ratrod_x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/release/ratrod
+
+  build_macos:
+    needs: test
+    name: Build MacOS
+    # TODO: Eventually, it would be better to cross-compile with `aarch64-apple-darwin`.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          target: aarch64-apple-darwin
+          override: true
+      - run: cargo build --target aarch64-apple-darwin --release
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ratrod_aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/ratrod
