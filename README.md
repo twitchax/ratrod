@@ -3,8 +3,6 @@
 [![Version](https://img.shields.io/crates/v/ratrod.svg)](https://crates.io/crates/ratrod)
 [![Crates.io](https://img.shields.io/crates/d/ratrod?label=crate)](https://crates.io/crates/ratrod)
 [![GitHub all releases](https://img.shields.io/github/downloads/twitchax/ratrod/total?label=binary)](https://github.com/twitchax/ratrod/releases)
-[![Documentation](https://docs.rs/ratrod/badge.svg)](https://docs.rs/ratrod)
-[![Rust](https://img.shields.io/crates/msrv/ratrod)](https://github.com/twitchax/ratrod)
 [![License:MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # ratrod
