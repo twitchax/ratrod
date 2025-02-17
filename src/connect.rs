@@ -170,9 +170,9 @@ async fn remote_connect_tcp() -> Res<TcpStream> {
 }
 
 async fn test_tcp_connection() {
-    info!("⏳ Testing TCP connection ...");
-
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    
+    info!("⏳ Testing TCP connection ...");
 
     let mut stream = match TcpStream::connect(BIND_ADDRESS.get().unwrap()).await {
         Ok(stream) => stream,
