@@ -4,7 +4,6 @@ use anyhow::Context;
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 use rand::{distr::Alphanumeric, Rng};
 use ring::{rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey}};
-use sha2::{Digest, Sha256};
 use tokio::{io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite}, net::TcpStream};
 use tracing::debug;
 
@@ -16,19 +15,6 @@ pub fn random_string(len: usize) -> String {
         .take(len)
         .map(char::from)
         .collect()
-}
-
-pub fn hash_key(key: &str, salt: &str) -> String {
-    let mut hasher = Sha256::new();
-
-    hasher.update(key);
-    hasher.update(salt);
-
-    format!("{:x}", hasher.finalize())
-}
-
-pub fn verify_key(key: &str, salt: &str, hash: &str) -> bool {
-    hash_key(key, salt) == hash
 }
 
 pub fn generate_key_pair() -> Res<Base64KeyPair> {
@@ -280,6 +266,21 @@ pub mod tests {
     }
 
     #[test]
+    fn test_generate_key_pair() {
+        let key_pair = generate_key_pair().unwrap();
+        assert_eq!(key_pair.public_key.len(), 43);
+        assert_eq!(key_pair.private_key.len(), 111);
+    }
+
+    #[test]
+    fn test_generate_key_pair_from_key() {
+        let key_pair = generate_key_pair().unwrap();
+        let new_key_pair = generate_key_pair_from_key(&key_pair.private_key).unwrap();
+        assert_eq!(new_key_pair.public_key, key_pair.public_key);
+        assert_eq!(new_key_pair.private_key, key_pair.private_key);
+    }
+
+    #[test]
     fn test_parse_tunnel_definition() {
         let input = "a:b:c:d";
         let result = parse_tunnel_definition(input).unwrap();
@@ -300,6 +301,15 @@ pub mod tests {
         let result = parse_tunnel_definition(input).unwrap();
         assert_eq!(result.bind_address, "localhost:a");
         assert_eq!(result.remote_address, "localhost:a");
+    }
+
+    #[test]
+    fn test_bad_tunnel_definition() {
+        let input = "a:b:c:d:e";
+        assert!(parse_tunnel_definition(input).is_err());
+
+        let input = "a:b:c:d:e:f";
+        assert!(parse_tunnel_definition(input).is_err());
     }
 
     #[test]
