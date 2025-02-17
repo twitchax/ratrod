@@ -20,6 +20,10 @@ pub async fn start(server: String, tunnel: String, private_key: String) -> Void 
 
     prepare_globals(private_key, tunnel_definition.bind_address, server, tunnel_definition.remote_address)?;
 
+    // Schedule a test connection.
+
+    tokio::spawn(test_tcp_connection());
+
     // Finally, start the server.
 
     info!("📻 Listening on `{}`, and routing through `{}` to `{}` ...", BIND_ADDRESS.get().unwrap(), CONNECT_ADDRESS.get().unwrap(), REMOTE_ADDRESS.get().unwrap());
@@ -163,6 +167,27 @@ async fn remote_connect_tcp() -> Res<TcpStream> {
     info!("✅ Connected to server `{}` ...", CONNECT_ADDRESS.get().unwrap());
 
     Ok(stream)
+}
+
+async fn test_tcp_connection() {
+    info!("⏳ Testing TCP connection ...");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let mut stream = match TcpStream::connect(BIND_ADDRESS.get().unwrap()).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            error!("❌ Error testing connection: `{}`", err);
+            return;
+        }
+    };
+
+    match stream.shutdown().await {
+        Ok(_) => {},
+        Err(err) => {
+            error!("❌ Error testing connection shutdown: `{}`", err);
+        }
+    };
 }
 
 #[cfg(test)]
