@@ -1,6 +1,6 @@
 [package]
 name = "ratrod"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Aaron Roney <twitchax@gmail.com>"]
 description = "Tunnels a local port to a remote server, which then redirects traffic to a specified remote host."
