@@ -1,6 +1,6 @@
-use std::{borrow::Cow, sync::OnceLock};
+use std::{borrow::Cow, io::ErrorKind, sync::OnceLock, time::Duration};
 
-use tokio::{io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
+use tokio::{io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
 use tracing::{error, info, info_span, Instrument};
 
 use crate::{base::{Err, Res, Sentinel, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
@@ -171,23 +171,43 @@ async fn remote_connect_tcp() -> Res<TcpStream> {
 
 async fn test_tcp_connection() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    
+
     info!("⏳ Testing TCP connection ...");
+    
+    let result = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(BIND_ADDRESS.get().unwrap())).await;
 
-    let mut stream = match TcpStream::connect(BIND_ADDRESS.get().unwrap()).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            error!("❌ Error testing connection: `{}`", err);
+    let mut stream = match result {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
+            error!("❌ Error connecting to TCP server: {}", err);
             return;
-        }
+        },
+        Err(_) => {
+            error!("❌ Timeout connecting to TCP server");
+            return;
+        },
     };
 
-    match stream.shutdown().await {
-        Ok(_) => {},
-        Err(err) => {
-            error!("❌ Error testing connection shutdown: `{}`", err);
-        }
-    };
+    // For our test connect, we attempt to read a `u8`.  If it times out, that's "good", since it means that this instance was likely able to
+    // complete the handshake with the server.  If it fails with EOF, then the handshake was likely not completed, so this test socket was closed
+    // by this instance.
+    // Therefore:
+    // - Timeout: good.
+    // - EOF: bad.
+    
+    let result = tokio::time::timeout(Duration::from_secs(1), stream.read_u8()).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("This should never happen.  The read test should not have bytes to read."),
+        Ok(Err(err)) => {
+            if err.kind() == ErrorKind::UnexpectedEof {
+                error!("❌ The test socket was closed, which indicates the handshake may have failed.");
+            } else {
+                error!("❌ Another error occurred reading from TCP connection test (this may be OK): {}", err);
+            }
+        },
+        Err(_) => info!("✅ TCP connection test passed: connection is good."),
+    }
 }
 
 #[cfg(test)]
