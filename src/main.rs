@@ -72,7 +72,7 @@ async fn main() {
     }
 }
 
-/// Tunnels a local port to a remote server, which then redirects the
+/// Tunnels a local port to a remote server, which then redirects
 /// traffic to a specified remote host.
 /// 
 /// A (likely semi-inefficient) TCP tunneler that uses public/private key authentication without subsequent encryption.
