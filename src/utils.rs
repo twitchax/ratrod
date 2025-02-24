@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use base64::Engine;
 use rand::{distr::Alphanumeric, Rng};
-use ring::{rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey}};
+use ring::{aead::{Aad, LessSafeKey, Nonce, UnboundKey}, hkdf::Salt, rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey}};
 use tokio::{io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite}, net::TcpStream};
 use tracing::debug;
 
-use crate::base::{Base64KeyPair, Err, Preamble, Res, Sentinel, TunnelDefinition, Void};
+use crate::base::{Base64KeyPair, EncryptedData, Err, Preamble, Res, Constant, TunnelDefinition, Void};
 
 pub fn random_string(len: usize) -> String {
     rand::rng()
@@ -23,46 +23,91 @@ pub fn generate_key_pair() -> Res<Base64KeyPair> {
 
     let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).context("Failed to create key pair")?;
 
-    let public = BASE64_URL_SAFE_NO_PAD.encode(key_pair.public_key().as_ref());
-    let private = BASE64_URL_SAFE_NO_PAD.encode(pkcs8.as_ref());
+    let public = Constant::BASE64_ENGINE.encode(key_pair.public_key().as_ref());
+    let private = Constant::BASE64_ENGINE.encode(pkcs8.as_ref());
 
     Ok(Base64KeyPair { public_key: public, private_key: private })
 }
 
 pub fn generate_key_pair_from_key(private_key: &str) -> Res<Base64KeyPair> {
-    let key_bytes = BASE64_URL_SAFE_NO_PAD.decode(private_key).context("Could not decode seed")?;
+    let key_bytes = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode seed")?;
 
     let key_pair = Ed25519KeyPair::from_pkcs8(&key_bytes).context("Failed to create key pair")?;
 
-    let public = BASE64_URL_SAFE_NO_PAD.encode(key_pair.public_key().as_ref());
+    let public = Constant::BASE64_ENGINE.encode(key_pair.public_key().as_ref());
 
     Ok(Base64KeyPair { public_key: public, private_key: private_key.to_string() })
 }
 
-pub fn generate_challenge() -> [u8; Sentinel::CHALLENGE_SIZE] {
+pub fn generate_challenge() -> [u8; Constant::CHALLENGE_SIZE] {
     let rng = SystemRandom::new();
-    let mut challenge = [0u8; Sentinel::CHALLENGE_SIZE];
+    let mut challenge = [0u8; Constant::CHALLENGE_SIZE];
     rng.fill(&mut challenge).expect("Failed to generate challenge");
     challenge
 }
 
-pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<[u8; Sentinel::SIGNATURE_SIZE]> {
+pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<[u8; Constant::SIGNATURE_SIZE]> {
     debug!("Challenge: `{:?}`", challenge);
     
-    let private_key = BASE64_URL_SAFE_NO_PAD.decode(private_key).context("Could not decode private key")?;
+    let private_key = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
     debug!("Signing challenge with private key: {:?}", &private_key);
 
     let key_pair = Ed25519KeyPair::from_pkcs8(&private_key).map_err(|_| Err::msg("Invalid private key"))?;
     debug!("Key pair: {:?}", key_pair);
 
-    let signature = key_pair.sign(challenge).as_ref()[..Sentinel::SIGNATURE_SIZE].try_into().map_err(|_| Err::msg("Invalid signature length"))?;
+    let signature = key_pair.sign(challenge).as_ref()[..Constant::SIGNATURE_SIZE].try_into().map_err(|_| Err::msg("Invalid signature length"))?;
     debug!("Signature: {:?}", &signature);
 
     Ok(signature)
 }
 
+pub fn generate_chacha_key(private_key: &str, challenge: &[u8]) -> Res<[u8; Constant::CHACHA20_KEY_SIZE]> {
+    let private_key_bytes = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
+    let salt = Salt::new(Constant::KDF, challenge);
+    let info = &[challenge];
+
+    let prk = salt.extract(&private_key_bytes);
+    let okm = prk.expand(info, Constant::KDF)?;
+
+    let mut key = [0u8; Constant::CHACHA20_KEY_SIZE];
+    okm.fill(&mut key)?;
+
+    Ok(key)
+}
+
+pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; Constant::CHACHA20_NONCE_SIZE];
+    rng.fill(&mut nonce_bytes).context("Could not fill nonce for encryption")?;
+
+    let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for encryption")?;
+    let sealing_key = LessSafeKey::new(unbound_key);
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut in_out = plaintext.to_vec();
+    in_out.reserve_exact(Constant::AEAD.tag_len());
+
+    sealing_key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out).context("Could not seal in place during encryption")?;
+    
+    Ok(EncryptedData {
+        nonce: nonce_bytes,
+        data: in_out,
+    })
+}
+
+pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &[u8; Constant::CHACHA20_NONCE_SIZE]) -> Res<Vec<u8>> {
+    let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for decryption")?;
+    let opening_key = LessSafeKey::new(unbound_key);
+    let nonce = Nonce::assume_unique_for_key(*nonce_bytes);
+
+    let mut in_out = ciphertext.to_vec();
+    let plaintext = opening_key.open_in_place(nonce, Aad::empty(), &mut in_out).context("Could not open in place for decryption")?;
+
+    Ok(plaintext.to_vec())
+}
+
 pub fn validate_signed_challenge(challenge: &[u8], signature: &[u8], public_key: &str) -> Void {
-    let public_key = BASE64_URL_SAFE_NO_PAD.decode(public_key).context("Could not decode public key")?;
+    let public_key = Constant::BASE64_ENGINE.decode(public_key).context("Could not decode public key")?;
 
     let unparsed_public_key = UnparsedPublicKey::new(&ring::signature::ED25519, public_key);
 
@@ -87,18 +132,18 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
             Ok(TunnelDefinition { bind_address, remote_address: host_address })
         }
         3 => {
-            let bind_address = format!("localhost:{}", parts[0]);
+            let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("{}:{}", parts[1], parts[2]);
             Ok(TunnelDefinition { bind_address, remote_address: host_address })
         }
         2 => {
-            let bind_address = format!("localhost:{}", parts[0]);
-            let host_address = format!("localhost:{}", parts[1]);
+            let bind_address = format!("127.0.0.1:{}", parts[0]);
+            let host_address = format!("127.0.0.1:{}", parts[1]);
             Ok(TunnelDefinition { bind_address, remote_address: host_address })
         }
         1 => {
-            let bind_address = format!("localhost:{}", parts[0]);
-            let host_address = format!("localhost:{}", parts[0]);
+            let bind_address = format!("127.0.0.1:{}", parts[0]);
+            let host_address = format!("127.0.0.1:{}", parts[0]);
             Ok(TunnelDefinition { bind_address, remote_address: host_address })
         }
         _ => Err(Err::msg("Invalid tunnel definition format")),
@@ -108,7 +153,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
 pub fn prepare_preamble(remote: &str) -> Res<Vec<u8>> {
     let remote_bytes = remote.as_bytes();
 
-    let preamble = [Sentinel::PREAMBLE_INIT, remote_bytes, Sentinel::DELIMITER].concat();
+    let preamble = [Constant::PREAMBLE_INIT, remote_bytes, Constant::DELIMITER].concat();
 
     Ok(preamble)
 }
@@ -120,9 +165,9 @@ where
 {
     let data = read_to_next_delimiter(stream).await?;
 
-    let (init, remote_bytes) = data.split_at(Sentinel::SIZE);
+    let (init, remote_bytes) = data.split_at(Constant::SIZE);
 
-    if init != Sentinel::PREAMBLE_INIT {
+    if init != Constant::PREAMBLE_INIT {
         return Err(Err::msg("Invalid preamble"));
     }
 
@@ -135,7 +180,7 @@ pub async fn read_to_next_delimiter<T>(stream: &mut T) -> Res<Vec<u8>>
 where 
     T: AsyncBufRead + Unpin,
 {
-    let mut buffer = Vec::with_capacity(Sentinel::BUFFER_SIZE);
+    let mut buffer = Vec::with_capacity(Constant::BUFFER_SIZE);
     let mut delimiter_index = usize::MAX;
 
     for _ in 0..100 {
@@ -143,8 +188,8 @@ where
 
         // Find next delimiter.
 
-        for (k, window) in inner_buffer.windows(Sentinel::SIZE).enumerate() {
-            if window == Sentinel::DELIMITER {
+        for (k, window) in inner_buffer.windows(Constant::SIZE).enumerate() {
+            if window == Constant::DELIMITER {
                 delimiter_index = k;
                 break;
             }
@@ -163,7 +208,7 @@ where
     }
 
     // Consume the data.
-    stream.consume(delimiter_index + Sentinel::SIZE);
+    stream.consume(delimiter_index + Constant::SIZE);
 
     Ok(buffer)
 }
@@ -281,6 +326,41 @@ pub mod tests {
     }
 
     #[test]
+    fn test_ed25519() {
+        let key_pair = generate_key_pair().unwrap();
+
+        let challenge = generate_challenge();
+        let signature = sign_challenge(&challenge, &key_pair.private_key).unwrap();
+
+        validate_signed_challenge(&challenge, &signature, &key_pair.public_key).unwrap();
+    }
+
+    #[test]
+    fn test_generate_chacha20_key() {
+        let private_key = generate_key_pair().unwrap().private_key;
+        let challenge = generate_challenge();
+
+        let chacha20_key_1 = generate_chacha_key(&private_key, &challenge).unwrap();
+        let chacha20_key_2 = generate_chacha_key(&private_key, &challenge).unwrap();
+
+        assert_eq!(chacha20_key_1.len(), Constant::CHACHA20_KEY_SIZE);
+        assert_eq!(chacha20_key_1, chacha20_key_2);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt() {
+        let private_key = generate_key_pair().unwrap().private_key;
+        let challenge = generate_challenge();
+        let chacha20_key = generate_chacha_key(&private_key, &challenge).unwrap();
+
+        let plaintext = b"Hello, world!";
+        let encrypted_data = encrypt(&chacha20_key, plaintext).unwrap();
+        let decrypted_data = decrypt(&chacha20_key, &encrypted_data.data, &encrypted_data.nonce).unwrap();
+
+        assert_eq!(decrypted_data, plaintext);
+    }
+
+    #[test]
     fn test_parse_tunnel_definition() {
         let input = "a:b:c:d";
         let result = parse_tunnel_definition(input).unwrap();
@@ -289,18 +369,18 @@ pub mod tests {
 
         let input = "a:b:c";
         let result = parse_tunnel_definition(input).unwrap();
-        assert_eq!(result.bind_address, "localhost:a");
+        assert_eq!(result.bind_address, "127.0.0.1:a");
         assert_eq!(result.remote_address, "b:c");
 
         let input = "a:b";
         let result = parse_tunnel_definition(input).unwrap();
-        assert_eq!(result.bind_address, "localhost:a");
-        assert_eq!(result.remote_address, "localhost:b");
+        assert_eq!(result.bind_address, "127.0.0.1:a");
+        assert_eq!(result.remote_address, "127.0.0.1:b");
 
         let input = "a";
         let result = parse_tunnel_definition(input).unwrap();
-        assert_eq!(result.bind_address, "localhost:a");
-        assert_eq!(result.remote_address, "localhost:a");
+        assert_eq!(result.bind_address, "127.0.0.1:a");
+        assert_eq!(result.remote_address, "127.0.0.1:a");
     }
 
     #[test]
@@ -318,7 +398,7 @@ pub mod tests {
 
         let preamble = prepare_preamble(remote).unwrap();
 
-        assert_eq!(preamble.len(), remote.len() + 2 * Sentinel::SIZE);
+        assert_eq!(preamble.len(), remote.len() + 2 * Constant::SIZE);
     }
 
     #[tokio::test]
@@ -349,21 +429,11 @@ pub mod tests {
     #[tokio::test]
     async fn test_read_to_next_delimiter() {
         let message = b"Hello, world!";
-        let data = [message, Sentinel::DELIMITER].concat();
+        let data = [message, Constant::DELIMITER].concat();
         let mut stream = BufReader::new(MockStream::new(data, vec![]));
 
         let result = read_to_next_delimiter(&mut stream).await.unwrap();
 
         assert_eq!(result, message);
-    }
-
-    #[test]
-    fn test_ed25519() {
-        let key_pair = generate_key_pair().unwrap();
-
-        let challenge = generate_challenge();
-        let signature = sign_challenge(&challenge, &key_pair.private_key).unwrap();
-
-        validate_signed_challenge(&challenge, &signature, &key_pair.public_key).unwrap();
     }
 }

@@ -1,45 +1,54 @@
-use std::{borrow::Cow, io::ErrorKind, sync::OnceLock, time::Duration};
+use std::{io::ErrorKind, marker::PhantomData, sync::OnceLock, time::Duration};
 
 use tokio::{io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
 use tracing::{error, info, info_span, Instrument};
 
-use crate::{base::{Err, Res, Sentinel, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
+use crate::{base::{Err, Res, Constant, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
 
-static PRIVATE_KEY: OnceLock<String> = OnceLock::new();
+// State machine.
 
-static BIND_ADDRESS: OnceLock<String> = OnceLock::new();
-static CONNECT_ADDRESS: OnceLock<String> = OnceLock::new();
-static REMOTE_ADDRESS: OnceLock<String> = OnceLock::new();
+pub struct ConfigState;
+pub struct ReadyState;
 
-pub async fn start(server: String, tunnel: String, private_key: String) -> Void {
-    // Compute the tunnel definition.
-
-    let tunnel_definition = parse_tunnel_definition(&tunnel)?;
-
-    // Prepare the globals.
-
-    prepare_globals(private_key, tunnel_definition.bind_address, server, tunnel_definition.remote_address)?;
-
-    // Schedule a test connection.
-
-    tokio::spawn(test_tcp_connection());
-
-    // Finally, start the server.
-
-    info!("📻 Listening on `{}`, and routing through `{}` to `{}` ...", BIND_ADDRESS.get().unwrap(), CONNECT_ADDRESS.get().unwrap(), REMOTE_ADDRESS.get().unwrap());
-    run_tcp_server().await?;
-
-    Ok(())   
+pub struct Instance<S = ConfigState> {
+    _phantom: PhantomData<S>,
 }
 
-fn prepare_globals<'a, 'b, 'c>(key: impl Into<Cow<'a, str>>, bind_address: impl Into<Cow<'b, str>>, connect_address: impl Into<Cow<'c, str>>, remote_address: impl Into<Cow<'c, str>>) -> Void {
-    PRIVATE_KEY.get_or_init(|| key.into().to_string());
-    BIND_ADDRESS.get_or_init(|| bind_address.into().to_string());
-    CONNECT_ADDRESS.get_or_init(|| connect_address.into().to_string());
-    REMOTE_ADDRESS.get_or_init(|| remote_address.into().to_string());
-
-    Ok(())
+impl Instance<ConfigState> {
+    pub fn prepare<A, B, C>(private_key: A, connect_address: B, tunnel_definition: C, should_encrypt: bool) -> Res<Instance<ReadyState>>
+    where
+        A: Into<String>,
+        B: Into<String>,
+        C: AsRef<str>,
+    {
+        let tunnel = parse_tunnel_definition(tunnel_definition.as_ref())?;
+    
+        Config::create(private_key.into(), tunnel.bind_address, connect_address.into(), tunnel.remote_address, should_encrypt)?;
+    
+        Ok(Instance { _phantom: PhantomData })
+    }
 }
+
+impl Instance<ReadyState> {
+    pub async fn start(self) -> Void {
+        if !Config::ready() {
+            return Err(Err::msg("Configuration has not been set: only one config per process"));
+        }
+
+        // Schedule a test connection.
+
+        tokio::spawn(test_tcp_connection());
+
+        // Finally, start the server.
+
+        info!("📻 Listening on `{}`, and routing through `{}` to `{}` ...", Config::bind_address(), Config::connect_address(), Config::remote_address());
+        run_tcp_server().await?;
+
+        Ok(())
+    }
+}
+
+// Operations.
 
 async fn handle_handshake<T>(stream: &mut T) -> Void
 where 
@@ -67,8 +76,8 @@ where
     let challenge = handle_handshake_response(stream).await?;
     info!("🚧 Handshake challenge received ...");
 
-    let signature = sign_challenge(&challenge, PRIVATE_KEY.get().unwrap())?;
-    stream.write_all(&[Sentinel::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Sentinel::DELIMITER].concat()).await?;
+    let signature = sign_challenge(&challenge, Config::private_key())?;
+    stream.write_all(&[Constant::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Constant::DELIMITER].concat()).await?;
 
     info!("⏳ Awaiting challenge validation ...");
 
@@ -79,7 +88,7 @@ async fn send_preamble<T>(stream: &mut T) -> Void
 where 
     T: AsyncWrite + Unpin,
 {
-    let preamble = prepare_preamble(REMOTE_ADDRESS.get().unwrap())?;
+    let preamble = prepare_preamble(Config::remote_address())?;
     stream.write_all(&preamble).await?;
     info!("✅ Sent preamble to server ...");
 
@@ -92,21 +101,21 @@ where
 {
     let buf = read_to_next_delimiter(stream).await?;
 
-    if buf.starts_with(Sentinel::HANDSHAKE_COMPLETION) {
+    if buf.starts_with(Constant::HANDSHAKE_COMPLETION) {
         Ok(vec![])
-    } else if buf.starts_with(Sentinel::HANDSHAKE_CHALLENGE) {
-        if !buf.starts_with(Sentinel::HANDSHAKE_CHALLENGE) {
+    } else if buf.starts_with(Constant::HANDSHAKE_CHALLENGE) {
+        if !buf.starts_with(Constant::HANDSHAKE_CHALLENGE) {
             return Err(Err::msg("Handshake failed (challenge message did not start with the expected sentinel)"));
         }
 
-        let challenge = buf[Sentinel::SIZE..].to_vec();
+        let challenge = buf[Constant::SIZE..].to_vec();
         Ok(challenge)
-    } else if buf.starts_with(Sentinel::ERROR_INVALID_KEY) {
-        let message = String::from_utf8(buf[Sentinel::SIZE..].to_vec())?;
+    } else if buf.starts_with(Constant::ERROR_INVALID_KEY) {
+        let message = String::from_utf8(buf[Constant::SIZE..].to_vec())?;
 
         Err(Err::msg(format!("Handshake failed (invalid key): {}", message)))
-    } else if buf.starts_with(Sentinel::ERROR_INVALID_HOST) {
-        let message = String::from_utf8(buf[Sentinel::SIZE..].to_vec())?;
+    } else if buf.starts_with(Constant::ERROR_INVALID_HOST) {
+        let message = String::from_utf8(buf[Constant::SIZE..].to_vec())?;
 
         Err(Err::msg(format!("Handshake failed (invalid host): {}", message)))
     } else {
@@ -115,7 +124,7 @@ where
 }
 
 async fn run_tcp_server() -> Void {
-    let listener = TcpListener::bind(BIND_ADDRESS.get().unwrap()).await?;
+    let listener = TcpListener::bind(Config::bind_address()).await?;
 
     loop {
         let (socket, _) = listener.accept().await?;
@@ -163,8 +172,8 @@ async fn handle_tcp(mut local: TcpStream) -> Void {
 }
 
 async fn remote_connect_tcp() -> Res<TcpStream> {
-    let stream = TcpStream::connect(CONNECT_ADDRESS.get().unwrap()).await?;
-    info!("✅ Connected to server `{}` ...", CONNECT_ADDRESS.get().unwrap());
+    let stream = TcpStream::connect(Config::connect_address()).await?;
+    info!("✅ Connected to server `{}` ...", Config::connect_address());
 
     Ok(stream)
 }
@@ -174,7 +183,7 @@ async fn test_tcp_connection() {
 
     info!("⏳ Testing TCP connection ...");
     
-    let result = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(BIND_ADDRESS.get().unwrap())).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(Config::bind_address())).await;
 
     let mut stream = match result {
         Ok(Ok(stream)) => stream,
@@ -210,6 +219,66 @@ async fn test_tcp_connection() {
     }
 }
 
+// Statics.
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+struct Config {
+    private_key: String,
+    bind_address: String,
+    connect_address: String,
+    remote_address: String,
+    should_encrypt: bool,
+}
+
+impl Config {
+    pub fn create(private_key: String, bind_address: String, connect_address: String, remote_address: String, should_encrypt: bool) -> Res<&'static Self> {
+        if Self::ready() {
+            return Err(Err::msg("Configuration has already been set."));
+        }
+
+        let this = Self {
+            private_key,
+            bind_address,
+            connect_address,
+            remote_address,
+            should_encrypt,
+        };
+
+        Ok(CONFIG.get_or_init(move || this))
+    }
+
+    pub fn ready() -> bool {
+        CONFIG.get().is_some()
+    }
+
+    pub fn get() -> &'static Self {
+        CONFIG.get().unwrap()
+    }
+    
+    pub fn private_key() -> &'static str {
+        Self::get().private_key.as_str()
+    }
+    
+    pub fn bind_address() -> &'static str {
+        Self::get().bind_address.as_str()
+    }
+
+    pub fn connect_address() -> &'static str {
+        Self::get().connect_address.as_str()
+    }
+
+    pub fn remote_address() -> &'static str {
+        Self::get().remote_address.as_str()
+    }
+
+    pub fn should_encrypt() -> bool {
+        Self::get().should_encrypt
+    }
+}
+
+// Tests.
+
 #[cfg(test)]
 pub mod tests {
     use crate::utils::tests::MockStream;
@@ -220,25 +289,26 @@ pub mod tests {
     #[test]
     fn test_prepare_globals() {
         let key = "key";
-        let bind_address = "bind_address";
         let connect_address = "connect_address";
-        let remote_address = "remote_address";
+        let tunnel_definition = "a:b:c:d";
 
-        prepare_globals(key, bind_address, connect_address, remote_address).unwrap();
+        Instance::prepare(key, connect_address, tunnel_definition, false).unwrap();
 
-        assert_eq!(PRIVATE_KEY.get().unwrap(), key);
-        assert_eq!(BIND_ADDRESS.get().unwrap(), bind_address);
-        assert_eq!(CONNECT_ADDRESS.get().unwrap(), connect_address);
-        assert_eq!(REMOTE_ADDRESS.get().unwrap(), remote_address);
+        assert_eq!(Config::private_key(), key);
+        assert_eq!(Config::bind_address(), "a:b");
+        assert_eq!(Config::connect_address(), "connect_address");
+        assert_eq!(Config::remote_address(), "c:d");
+        assert_eq!(Config::should_encrypt(), false);
     }
 
     #[tokio::test]
     async fn test_send_preamble() {
         let key = "key";
-        let remote_address = "remote_address";
+        let remote_address = "remote_address:3000";
+        let tunnel_definition = format!("a:b:{}", remote_address);
         let expected = prepare_preamble(remote_address).unwrap();
 
-        prepare_globals(key, "bind_address", "connect_address", remote_address).unwrap();
+        Instance::prepare(key, "connect_address", tunnel_definition, false).unwrap();
 
         let mut stream = MockStream::new(vec![], vec![]);
         
@@ -249,7 +319,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_handle_handshake_response() {
-        let mut stream = BufReader::new(MockStream::new([Sentinel::HANDSHAKE_COMPLETION, Sentinel::DELIMITER].concat(), vec![]));
+        let mut stream = BufReader::new(MockStream::new([Constant::HANDSHAKE_COMPLETION, Constant::DELIMITER].concat(), vec![]));
 
         handle_handshake_response(&mut stream).await.unwrap();
     }
@@ -257,7 +327,7 @@ pub mod tests {
     #[tokio::test]
     async fn handle_failed_key_handshake_response() {
         let message = "foo";
-        let mut stream = BufReader::new(MockStream::new([Sentinel::ERROR_INVALID_KEY, message.as_bytes(), Sentinel::DELIMITER].concat(), vec![]));
+        let mut stream = BufReader::new(MockStream::new([Constant::ERROR_INVALID_KEY, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 
@@ -268,7 +338,7 @@ pub mod tests {
     #[tokio::test]
     async fn handle_failed_host_handshake_response() {
         let message = "foo";
-        let mut stream = BufReader::new(MockStream::new([Sentinel::ERROR_INVALID_HOST, message.as_bytes(), Sentinel::DELIMITER].concat(), vec![]));
+        let mut stream = BufReader::new(MockStream::new([Constant::ERROR_INVALID_HOST, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 
@@ -278,7 +348,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn handle_failed_unknown_handshake_response() {
-        let mut stream = BufReader::new(MockStream::new([&[0x00], Sentinel::DELIMITER].concat(), vec![]));
+        let mut stream = BufReader::new(MockStream::new([&[0x00], Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 

@@ -1,8 +1,9 @@
 #![feature(coverage_attribute)]
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
-use base::Err;
+use base::{Err, Void};
 
 pub mod base;
 pub mod utils;
@@ -31,45 +32,42 @@ async fn main() {
         .with_max_level(level)
         .init();
 
-    let result = match args.command {
-        Some(Command::Serve { bind, key, remote_regex }) => {
-            let pair_result = match key {
-                Some(key) => utils::generate_key_pair_from_key(&key),
-                None => utils::generate_key_pair(),
-            };
-
-            let pair = match pair_result {
-                Ok(pair) => pair,
-                Err(err) => {
-                    error!("❌ Failed to generate keypair: {}", err);
-                    std::process::exit(1);
-                }
-            };
-
-            info!("🔑 Private key (for clients): `{}`.", pair.private_key);
-
-            info!("🚀 Starting server on `{}` ...", bind);
-
-            serve::start(bind, pair.public_key, remote_regex).await
-        }
-        Some(Command::Connect { server, tunnel, key }) => {
-            connect::start(server, tunnel, key).await
-        }
-        Some(Command::GenerateKeypair) => {
-            let pair = utils::generate_key_pair().unwrap();
-            info!("📢 Public key: `{}`", pair.public_key);
-            info!("🔑 Private key: `{}`", pair.private_key);
-            Ok(())
-        }
-        None => {
-            Err(Err::msg("No command specified."))
-        }
-    };
+    let result = execute_command(args.command).await;
 
     if let Err(err) = result {
         error!("❌ {}", err);
         std::process::exit(1);
     }
+}
+
+async fn execute_command(command: Option<Command>) -> Void {
+    match command {
+        Some(Command::Serve { bind, key, remote_regex, encrypt }) => {
+            let pair = match key {
+                Some(key) => utils::generate_key_pair_from_key(&key),
+                None => utils::generate_key_pair(),
+            }.context("Failed to generate keypair")?;
+
+            info!("🔑 Private key (for clients): `{}`.", pair.private_key);
+
+            info!("🚀 Starting server on `{}` ...", bind);
+
+            serve::Instance::prepare(pair.private_key, pair.public_key, remote_regex, bind, encrypt)?.start().await?;
+        }
+        Some(Command::Connect { server, tunnel, key, encrypt }) => {
+            connect::Instance::prepare(key, server, tunnel, encrypt)?.start().await?;
+        }
+        Some(Command::GenerateKeypair) => {
+            let pair = utils::generate_key_pair().unwrap();
+            info!("📢 Public key: `{}`", pair.public_key);
+            info!("🔑 Private key: `{}`", pair.private_key);
+        }
+        None => {
+            return Err(Err::msg("No command specified."));
+        }
+    };
+
+    Ok(())
 }
 
 /// Tunnels a local port to a remote server, which then redirects
@@ -114,6 +112,12 @@ enum Command {
         /// The regex is matched against the entire hostname, so `^` and `$` are not needed.
         #[arg(short, long, default_value = ".*")]
         remote_regex: String,
+
+        /// Specifies whether to encrypt the traffic between the client and server.
+        /// 
+        /// Both the client and server must specify this flag for it to take effect properly.
+        #[arg(short, long, default_value_t = false)]
+        encrypt: bool,
     },
 
     /// Connects to a server and forwards traffic from a local port to a remote `host:port`
@@ -138,9 +142,9 @@ enum Command {
         /// it can be reduced to `remote_port`.
         /// 
         /// Some examples:
-        /// - `3000:localhost:3000`: Requests to the client port 3000 route to `localhost:3000` on the server (
+        /// - `3000:127.0.0.1:3000`: Requests to the client port 3000 route to `127.0.0.1:3000` on the server (
         ///   same as `3000:3000` or `3000`).
-        /// - `3000:localhost:80`: - Requests to the client port 3000 route to `localhost:80` on the server (
+        /// - `3000:127.0.0.1:80`: - Requests to the client port 3000 route to `127.0.0.1:80` on the server (
         ///   same as `3000:80`).
         /// - `3000:example.com:80`: - Requests to the client port 3000 route to `example.com:80` on the server.
         ///   This is for use cases where the client can contact the server, but not the remote host, so the server
@@ -153,6 +157,12 @@ enum Command {
         /// The key is not used for encryption.
         #[arg(short, long, default_value = "")]
         key: String,
+
+        /// Specifies whether to encrypt the traffic between the client and server.
+        /// 
+        /// Both the client and server must specify this flag for it to take effect properly.
+        #[arg(short, long, default_value_t = false)]
+        encrypt: bool,
     },
 
     /// Generates a keypair and prints it to the console.
@@ -173,20 +183,20 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 
-    async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16) -> String {
-        let remote_address = format!("localhost:{}", port);
-        let server_address = format!("localhost:{}", port + 1);
+    async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> String {
+        let remote_address = format!("127.0.0.1:{}", port);
+        let server_address = format!("127.0.0.1:{}", port + 1);
         let client_tunnel = format!("{}:{}", port + 2, port);
-        let client_address = format!("localhost:{}", port + 2);
+        let client_address = format!("127.0.0.1:{}", port + 2);
 
         // Start a "remote" echo server.
         tokio::spawn(EchoServer::start(remote_address));
 
         // Start a "server".
-        tokio::spawn(serve::start(server_address.clone(), public_key, remote_regex));
+        tokio::spawn(serve::Instance::prepare(private_key.clone(), public_key, remote_regex, server_address.clone(), should_encrypt).unwrap().start());
 
         // Start a "client".
-        tokio::spawn(connect::start(server_address, client_tunnel, private_key));
+        tokio::spawn(connect::Instance::prepare(private_key, server_address, client_tunnel, should_encrypt).unwrap().start());
 
         // Give a moment for the server to start.
 
@@ -197,13 +207,13 @@ mod tests {
 
     #[test]
     fn test_args() {
-        let args = Args::parse_from(["", "serve", "localhost:3000", "--key", "key", "--remote-regex", ".*"]);
+        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key", "key", "--remote-regex", ".*", "-e"]);
 
-        assert_eq!(args.command, Some(Command::Serve { bind: "localhost:3000".to_string(), key: Some("key".to_string()), remote_regex: ".*".to_string() }));
+        assert_eq!(args.command, Some(Command::Serve { bind: "127.0.0.1:3000".to_string(), key: Some("key".to_string()), remote_regex: ".*".to_string(), encrypt: true }));
 
-        let args = Args::parse_from(["", "connect", "localhost:3000", "3000:localhost:3000", "--key", "key"]);
+        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "--key", "key"]);
 
-        assert_eq!(args.command, Some(Command::Connect { server: "localhost:3000".to_string(), tunnel: "3000:localhost:3000".to_string(), key: "key".to_string() }));
+        assert_eq!(args.command, Some(Command::Connect { server: "127.0.0.1:3000".to_string(), tunnel: "3000:127.0.0.1:3000".to_string(), key: "key".to_string(), encrypt: false }));
     }
 
     #[tokio::test]
@@ -212,7 +222,7 @@ mod tests {
         let port = 3000;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port).await;
+        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
@@ -239,7 +249,7 @@ mod tests {
 
         let Base64KeyPair { public_key, .. } = generate_key_pair().unwrap();
         let Base64KeyPair { private_key, .. } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port).await;
+        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
@@ -259,11 +269,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_bad_host() {
-        let remote_regex = "not_localhost".to_string();
+        let remote_regex = "not_127.0.0.1".to_string();
         let port = 3200;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port).await;
+        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
