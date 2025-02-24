@@ -204,8 +204,7 @@ async fn handle_tcp(client: TcpStream) {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-#[derive(Debug, Clone)]
-pub struct Config {
+struct Config {
     private_key: String,
     public_key: String,
     bind_address: String,
@@ -214,7 +213,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn create(private_key: String, public_key: String, bind_address: String, remote_regex: Regex, should_encrypt: bool) -> Res<&'static Self> {
+    fn create(private_key: String, public_key: String, bind_address: String, remote_regex: Regex, should_encrypt: bool) -> Res<&'static Self> {
         if Self::ready() {
             return Err(Err::msg("Configuration has already been set: only one config per process"));
         }
@@ -230,31 +229,31 @@ impl Config {
         Ok(CONFIG.get_or_init(move || this))
     }
 
-    pub fn ready() -> bool {
+    fn ready() -> bool {
         CONFIG.get().is_some()
     }
 
-    pub fn get() -> &'static Self {
+    fn get() -> &'static Self {
         CONFIG.get().unwrap()
     }
     
-    pub fn private_key() -> &'static str {
+    fn private_key() -> &'static str {
         Self::get().private_key.as_str()
     }
 
-    pub fn public_key() -> &'static str {
+    fn public_key() -> &'static str {
         Self::get().public_key.as_str()
     }
 
-    pub fn bind_address() -> &'static str {
+    fn bind_address() -> &'static str {
         Self::get().bind_address.as_str()
     }
 
-    pub fn remote_regex() -> &'static Regex {
+    fn remote_regex() -> &'static Regex {
         &Self::get().remote_regex
     }
 
-    pub fn should_encrypt() -> bool {
+    fn should_encrypt() -> bool {
         Self::get().should_encrypt
     }
 }
