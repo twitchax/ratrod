@@ -2,19 +2,21 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use rand::{distr::Alphanumeric, Rng};
-use ring::{aead::{Aad, LessSafeKey, Nonce, UnboundKey}, agreement::{agree_ephemeral, EphemeralPrivateKey}, hkdf::Salt, rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair}};
+use rand::{Rng, distr::Alphanumeric};
+use ring::{
+    aead::{Aad, LessSafeKey, Nonce, UnboundKey},
+    agreement::{EphemeralPrivateKey, agree_ephemeral},
+    hkdf::Salt,
+    rand::{SecureRandom, SystemRandom},
+    signature::{Ed25519KeyPair, KeyPair},
+};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
-use crate::base::{Base64KeyPair, Challenge, Constant, EncryptedData, EphemeralKeyPair, PeerPublicKey, Err, Preamble, Res, SharedSecret, SharedSecretNonce, Signature, TunnelDefinition, Void};
+use crate::base::{Base64KeyPair, Challenge, Constant, EncryptedData, EphemeralKeyPair, Err, PeerPublicKey, Preamble, Res, SharedSecret, SharedSecretNonce, Signature, TunnelDefinition, Void};
 
 pub fn random_string(len: usize) -> String {
-    rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect()
+    rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
 }
 
 pub fn generate_key_pair() -> Res<Base64KeyPair> {
@@ -36,7 +38,10 @@ pub fn generate_key_pair_from_key(private_key: &str) -> Res<Base64KeyPair> {
 
     let public = Constant::BASE64_ENGINE.encode(key_pair.public_key().as_ref());
 
-    Ok(Base64KeyPair { public_key: public, private_key: private_key.to_string() })
+    Ok(Base64KeyPair {
+        public_key: public,
+        private_key: private_key.to_string(),
+    })
 }
 
 pub fn generate_challenge() -> Challenge {
@@ -48,14 +53,16 @@ pub fn generate_challenge() -> Challenge {
 
 pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<Signature> {
     debug!("Challenge: `{:?}`", challenge);
-    
+
     let private_key = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
     debug!("Signing challenge with private key: {:?}", &private_key);
 
     let key_pair = Ed25519KeyPair::from_pkcs8(&private_key).map_err(|_| Err::msg("Invalid private key"))?;
     debug!("Key pair: {:?}", key_pair);
 
-    let signature = key_pair.sign(challenge).as_ref()[..Constant::SIGNATURE_SIZE].try_into().map_err(|_| Err::msg("Invalid signature length"))?;
+    let signature = key_pair.sign(challenge).as_ref()[..Constant::SIGNATURE_SIZE]
+        .try_into()
+        .map_err(|_| Err::msg("Invalid signature length"))?;
     debug!("Signature: {:?}", &signature);
 
     Ok(signature)
@@ -73,9 +80,7 @@ pub fn generate_ephemeral_key_pair() -> Res<EphemeralKeyPair> {
 
 pub fn generate_shared_secret(private_key: EphemeralPrivateKey, peer_public_key: &PeerPublicKey, challenge: &Challenge) -> Res<SharedSecret> {
     let unparsed_peer_public_key = ring::agreement::UnparsedPublicKey::new(Constant::AGREEMENT, peer_public_key);
-    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| {
-        generate_chacha_key(shared_secret, challenge)
-    })??;
+    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| generate_chacha_key(shared_secret, challenge))??;
 
     Ok(shared_secret)
 }
@@ -105,12 +110,11 @@ pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
     let mut in_out = plaintext.to_vec();
     in_out.reserve_exact(Constant::AEAD.tag_len());
 
-    sealing_key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out).context("Could not seal in place during encryption")?;
-    
-    Ok(EncryptedData {
-        nonce: nonce_bytes,
-        data: in_out,
-    })
+    sealing_key
+        .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        .context("Could not seal in place during encryption")?;
+
+    Ok(EncryptedData { nonce: nonce_bytes, data: in_out })
 }
 
 pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &SharedSecretNonce) -> Res<Vec<u8>> {
@@ -135,34 +139,46 @@ pub fn validate_signed_challenge(challenge: &[u8], signature: &[u8], public_key:
 }
 
 /// Parses the tunnel definition from the given input string.
-/// 
+///
 /// Input is of the form:
 /// - `local_port:destination_host:destination_port`
 /// - `local_port:destination_port`
 /// - `local_port`
 pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
     let parts: Vec<&str> = tunnel.split(':').collect();
-    
+
     match parts.len() {
         4 => {
             let bind_address = format!("{}:{}", parts[0], parts[1]);
             let host_address = format!("{}:{}", parts[2], parts[3]);
-            Ok(TunnelDefinition { bind_address, remote_address: host_address })
+            Ok(TunnelDefinition {
+                bind_address,
+                remote_address: host_address,
+            })
         }
         3 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("{}:{}", parts[1], parts[2]);
-            Ok(TunnelDefinition { bind_address, remote_address: host_address })
+            Ok(TunnelDefinition {
+                bind_address,
+                remote_address: host_address,
+            })
         }
         2 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("127.0.0.1:{}", parts[1]);
-            Ok(TunnelDefinition { bind_address, remote_address: host_address })
+            Ok(TunnelDefinition {
+                bind_address,
+                remote_address: host_address,
+            })
         }
         1 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("127.0.0.1:{}", parts[0]);
-            Ok(TunnelDefinition { bind_address, remote_address: host_address })
+            Ok(TunnelDefinition {
+                bind_address,
+                remote_address: host_address,
+            })
         }
         _ => Err(Err::msg("Invalid tunnel definition format")),
     }
@@ -176,9 +192,8 @@ pub fn prepare_preamble(remote: &str, peer_public_key: &PeerPublicKey) -> Res<Ve
     Ok(preamble)
 }
 
-
 pub async fn process_preamble<T>(stream: &mut T) -> Res<Preamble>
-where 
+where
     T: AsyncBufRead + Unpin,
 {
     let data = read_to_next_delimiter(stream).await?;
@@ -201,7 +216,7 @@ pub fn find_next_delimiter(data: &[u8]) -> Option<usize> {
 }
 
 pub async fn read_to_next_delimiter<T>(stream: &mut T) -> Res<Vec<u8>>
-where 
+where
     T: AsyncBufRead + Unpin,
 {
     let mut buffer = Vec::with_capacity(Constant::BUFFER_SIZE);
@@ -218,7 +233,7 @@ where
                 break;
             }
         }
-        
+
         if delimiter_index != usize::MAX {
             buffer.extend_from_slice(&inner_buffer[..delimiter_index]);
             break;
@@ -243,7 +258,7 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
 {
     let result = tokio::io::copy_bidirectional(a, b).await?;
-    
+
     info!("➡️ {} bytes; ⬅️ {} bytes", result.0, result.1);
 
     Ok(result)
@@ -251,14 +266,22 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use std::{io, pin::Pin, task::{Context, Poll}, vec};
+    use std::{
+        io,
+        pin::Pin,
+        task::{Context, Poll},
+        vec,
+    };
     use tokio::io::AsyncWriteExt;
 
     use crate::buffed_stream::BuffedStream;
 
     use super::*;
     use pretty_assertions::assert_eq;
-    use tokio::{io::{AsyncWrite, ReadBuf}, net::TcpListener};
+    use tokio::{
+        io::{AsyncWrite, ReadBuf},
+        net::TcpListener,
+    };
 
     pub struct MockStream {
         pub read: Vec<u8>,
@@ -272,21 +295,13 @@ pub mod tests {
     }
 
     impl AsyncRead for MockStream {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
+        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
             Pin::new(&mut self.get_mut().read.as_slice()).poll_read(cx, buf)
         }
     }
 
     impl AsyncWrite for MockStream {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
             Pin::new(&mut self.get_mut().write).poll_write(cx, buf)
         }
 
@@ -308,7 +323,7 @@ pub mod tests {
             loop {
                 let (client, _) = listener.accept().await?;
                 tokio::spawn(async move {
-                    let (mut read, mut write) =  client.into_split();
+                    let (mut read, mut write) = client.into_split();
 
                     let _ = tokio::io::copy(&mut read, &mut write).await;
                 });
@@ -328,10 +343,7 @@ pub mod tests {
     }
 
     pub fn generate_test_fake_peer_public_key() -> PeerPublicKey {
-        b"this needs to be exactly 32 byte"
-            .as_ref()
-            .try_into()
-            .unwrap()
+        b"this needs to be exactly 32 byte".as_ref().try_into().unwrap()
     }
 
     #[test]
@@ -448,7 +460,7 @@ pub mod tests {
         client.shutdown().await.unwrap();
         remote.write_all(b"Hello, client!!").await.unwrap();
         remote.shutdown().await.unwrap();
-        
+
         let (up, down) = handle_pump(&mut server1, &mut server2).await.unwrap();
 
         assert_eq!(up, 14);

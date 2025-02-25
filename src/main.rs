@@ -1,26 +1,22 @@
 #![feature(coverage_attribute)]
 
 use anyhow::Context;
+use base::{Err, Void};
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
-use base::{Err, Void};
 
 pub mod base;
-pub mod utils;
 pub mod buffed_stream;
-pub mod serve;
 pub mod connect;
+pub mod serve;
+pub mod utils;
 
 #[coverage(off)]
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    let level = if args.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
+    let level = if args.verbose { tracing::Level::DEBUG } else { tracing::Level::INFO };
 
     tracing_subscriber::fmt()
         .with_ansi(true)
@@ -47,7 +43,8 @@ async fn execute_command(command: Option<Command>) -> Void {
             let pair = match key {
                 Some(key) => utils::generate_key_pair_from_key(&key),
                 None => utils::generate_key_pair(),
-            }.context("Failed to generate keypair")?;
+            }
+            .context("Failed to generate keypair")?;
 
             info!("🔑 Private key (for clients): `{}`.", pair.private_key);
 
@@ -73,7 +70,7 @@ async fn execute_command(command: Option<Command>) -> Void {
 
 /// Tunnels a local port to a remote server, which then redirects
 /// traffic to a specified remote host.
-/// 
+///
 /// A (likely semi-inefficient) TCP tunneler that uses public/private key authentication without subsequent encryption.
 /// Basically, it's `ssh -L`, but without the encryption.  This is useful for tunneling through a machine that doesn't support SSH.
 #[derive(Parser, Debug)]
@@ -90,11 +87,11 @@ struct Args {
 #[derive(Subcommand, PartialEq, Debug)]
 enum Command {
     /// Start a server on this machine that listens for incoming
-    /// connections and forwards them to a remote server (as 
+    /// connections and forwards them to a remote server (as
     /// specified by the client).
     Serve {
         /// Specifies the local `host:port` to bind to.
-        /// 
+        ///
         /// E.g., you may want to bind to `0.0.0.0:3000` to
         /// listen for connections from other machines on any interface,
         /// or `192.168.1.100:3000` to listen for connections from other
@@ -102,20 +99,20 @@ enum Command {
         bind: String,
 
         /// Specifies an optional private key to use for generating the keypair.
-        /// 
+        ///
         /// Otherwise, a random keypair is generated.
         #[arg(short, long)]
         key: Option<String>,
 
         /// Specifies an optional regex restriction on the remote hostnames that can be connected to.
         /// This is used to prevent clients from connecting to arbitrary through the server.
-        /// 
+        ///
         /// The regex is matched against the entire hostname, so `^` and `$` are not needed.
         #[arg(short, long, default_value = ".*")]
         remote_regex: String,
 
         /// Specifies whether to encrypt the traffic between the client and server.
-        /// 
+        ///
         /// Both the client and server must specify this flag for it to take effect properly.
         #[arg(short, long, default_value_t = false)]
         encrypt: bool,
@@ -125,23 +122,23 @@ enum Command {
     /// "through" the server.
     Connect {
         /// Specifies the server's `host:port` to connect to.
-        /// 
+        ///
         /// This is the destination of the server, and is not
         /// the "routing destination" of the traffic.
-        /// 
+        ///
         /// This would usually take the form of the server's address, e.g., `192.168.1.100:3000`
         server: String,
 
         /// Specifies the remote `client_port:host:remote_port` that the client wishes the server to route
         /// the traffic to.
-        /// 
+        ///
         /// This is the destination of the traffic, and is not
         /// necessarily the same as the server's `host:port`.
-        /// 
+        ///
         /// This can also be reduced to `client_port:remote_port` if the client wishes to connect to the server's
         /// own port.  Or, if the client wishes to connect to the server's same port,
         /// it can be reduced to `remote_port`.
-        /// 
+        ///
         /// Some examples:
         /// - `3000:127.0.0.1:3000`: Requests to the client port 3000 route to `127.0.0.1:3000` on the server (
         ///   same as `3000:3000` or `3000`).
@@ -153,21 +150,21 @@ enum Command {
         tunnel: String,
 
         /// Specifies an optional key to use for authentication from connecting clients.
-        /// 
+        ///
         /// The key is hashed with a salt, and thrown away, but otherwise is merely checked at connection time.
         /// The key is not used for encryption.
         #[arg(short, long, default_value = "")]
         key: String,
 
         /// Specifies whether to encrypt the traffic between the client and server.
-        /// 
+        ///
         /// Both the client and server must specify this flag for it to take effect properly.
         #[arg(short, long, default_value_t = false)]
         encrypt: bool,
     },
 
     /// Generates a keypair and prints it to the console.
-    /// 
+    ///
     /// This allows the user to easily get a keypair for use
     /// with the `serve` command, if they are looking for a
     /// stable keypair.
@@ -178,11 +175,17 @@ enum Command {
 mod tests {
     use std::time::Duration;
 
-    use crate::{base::Base64KeyPair, utils::{generate_key_pair, tests::EchoServer}};
+    use crate::{
+        base::Base64KeyPair,
+        utils::{generate_key_pair, tests::EchoServer},
+    };
 
     use super::*;
     use pretty_assertions::assert_eq;
-    use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
 
     async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> String {
         let remote_address = format!("127.0.0.1:{}", port);
@@ -210,11 +213,27 @@ mod tests {
     fn test_args() {
         let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key", "key", "--remote-regex", ".*", "-e"]);
 
-        assert_eq!(args.command, Some(Command::Serve { bind: "127.0.0.1:3000".to_string(), key: Some("key".to_string()), remote_regex: ".*".to_string(), encrypt: true }));
+        assert_eq!(
+            args.command,
+            Some(Command::Serve {
+                bind: "127.0.0.1:3000".to_string(),
+                key: Some("key".to_string()),
+                remote_regex: ".*".to_string(),
+                encrypt: true
+            })
+        );
 
         let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "--key", "key"]);
 
-        assert_eq!(args.command, Some(Command::Connect { server: "127.0.0.1:3000".to_string(), tunnel: "3000:127.0.0.1:3000".to_string(), key: "key".to_string(), encrypt: false }));
+        assert_eq!(
+            args.command,
+            Some(Command::Connect {
+                server: "127.0.0.1:3000".to_string(),
+                tunnel: "3000:127.0.0.1:3000".to_string(),
+                key: "key".to_string(),
+                encrypt: false
+            })
+        );
     }
 
     #[tokio::test]

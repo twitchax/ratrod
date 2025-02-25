@@ -1,6 +1,9 @@
 use base64::{engine::GeneralPurpose, prelude::BASE64_URL_SAFE_NO_PAD};
-use ring::{aead::{self, CHACHA20_POLY1305}, agreement::{EphemeralPrivateKey, PublicKey}, hkdf::{self, HKDF_SHA256}};
-
+use ring::{
+    aead::{self, CHACHA20_POLY1305},
+    agreement::{EphemeralPrivateKey, PublicKey},
+    hkdf::{self, HKDF_SHA256},
+};
 
 pub type Err = anyhow::Error;
 pub type Res<T> = anyhow::Result<T, Err>;
@@ -9,36 +12,28 @@ pub type Void = Res<()>;
 pub struct Constant;
 
 impl Constant {
-    pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
-
-    pub const KDF: hkdf::Algorithm = HKDF_SHA256;
-    pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
-    pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
-
-    pub const DELIMITER_SIZE: usize = 8;
+    pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
+    pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
     pub const BUFFER_SIZE: usize = 8192;
-
     pub const CHALLENGE_SIZE: usize = 32;
-    pub const SIGNATURE_SIZE: usize = 64;
-    pub const PRIVATE_KEY_SIZE: usize = 83;
-
-    pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
-    pub const SHARED_SECRET_SIZE: usize = 32;
-    pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
-    pub const SHARED_SECRET_TAG_SIZE: usize = 16;
-    pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
-
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
-
-    pub const PREAMBLE_INIT: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBC";
-
+    pub const DELIMITER_SIZE: usize = 8;
+    pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
+    pub const ERROR_INVALID_HOST: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCB";
+    pub const ERROR_INVALID_KEY: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCA";
     pub const HANDSHAKE_CHALLENGE: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBD";
     pub const HANDSHAKE_CHALLENGE_RESPONSE: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBE";
     pub const HANDSHAKE_COMPLETION: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBF";
-
-    pub const ERROR_INVALID_KEY: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCA";
-    pub const ERROR_INVALID_HOST: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCB";
+    pub const KDF: hkdf::Algorithm = HKDF_SHA256;
+    pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
+    pub const PREAMBLE_INIT: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBC";
+    pub const PRIVATE_KEY_SIZE: usize = 83;
+    pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
+    pub const SHARED_SECRET_SIZE: usize = 32;
+    pub const SHARED_SECRET_TAG_SIZE: usize = 16;
+    pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
+    pub const SIGNATURE_SIZE: usize = 64;
 }
 
 /// A helper type for a shared secret.

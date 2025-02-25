@@ -1,10 +1,17 @@
 use std::{io::ErrorKind, marker::PhantomData, sync::OnceLock, time::Duration};
 
 use anyhow::Context;
-use tokio::{io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::{TcpListener, TcpStream}};
-use tracing::{error, info, info_span, Instrument};
+use tokio::{
+    io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
+use tracing::{Instrument, error, info, info_span};
 
-use crate::{base::{Challenge, Constant, EphemeralData, Err, PeerPublicKey, Res, Void}, buffed_stream::BuffedStream, utils::{generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
+use crate::{
+    base::{Challenge, Constant, EphemeralData, Err, PeerPublicKey, Res, Void},
+    buffed_stream::BuffedStream,
+    utils::{generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge},
+};
 
 // State machine.
 
@@ -23,9 +30,9 @@ impl Instance<ConfigState> {
         C: AsRef<str>,
     {
         let tunnel = parse_tunnel_definition(tunnel_definition.as_ref())?;
-    
+
         Config::create(private_key.into(), tunnel.bind_address, connect_address.into(), tunnel.remote_address, should_encrypt)?;
-    
+
         Ok(Instance { _phantom: PhantomData })
     }
 }
@@ -42,7 +49,12 @@ impl Instance<ReadyState> {
 
         // Finally, start the server.
 
-        info!("📻 Listening on `{}`, and routing through `{}` to `{}` ...", Config::bind_address(), Config::connect_address(), Config::remote_address());
+        info!(
+            "📻 Listening on `{}`, and routing through `{}` to `{}` ...",
+            Config::bind_address(),
+            Config::connect_address(),
+            Config::remote_address()
+        );
         run_tcp_server().await?;
 
         Ok(())
@@ -52,7 +64,7 @@ impl Instance<ReadyState> {
 // Operations.
 
 async fn handle_handshake<T>(stream: &mut T) -> Res<EphemeralData>
-where 
+where
     T: AsyncBufRead + AsyncWrite + Unpin,
 {
     let ephemeral_key_pair = generate_ephemeral_key_pair()?;
@@ -60,7 +72,7 @@ where
 
     send_preamble(stream, peer_public_key).await?;
     let challenge = handle_challenge(stream).await?;
-    
+
     // Await the handshake response.
 
     let data = handle_handshake_response(stream).await?;
@@ -79,7 +91,7 @@ where
 }
 
 async fn handle_challenge<T>(stream: &mut T) -> Res<Challenge>
-where 
+where
     T: AsyncBufRead + AsyncWrite + Unpin,
 {
     let challenge: Challenge = handle_handshake_response(stream).await?.try_into().map_err(|_| Err::msg("Could not convert challenge to array"))?;
@@ -95,7 +107,7 @@ where
 }
 
 async fn send_preamble<T>(stream: &mut T, peer_public_key: &PeerPublicKey) -> Void
-where 
+where
     T: AsyncWrite + Unpin,
 {
     let preamble = prepare_preamble(Config::remote_address(), peer_public_key)?;
@@ -108,7 +120,7 @@ where
 }
 
 async fn handle_handshake_response<T>(stream: &mut T) -> Res<Vec<u8>>
-where 
+where
     T: AsyncBufRead + Unpin,
 {
     let buf = read_to_next_delimiter(stream).await?;
@@ -166,7 +178,7 @@ async fn handle_tcp(mut local: TcpStream) {
             let challenge = ephemeral_data.challenge;
 
             let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
-            
+
             remote = remote.with_encryption(shared_secret);
             info!("🔒 Encryption applied ...");
         }
@@ -180,7 +192,9 @@ async fn handle_tcp(mut local: TcpStream) {
         info!("✅ Connection closed.");
 
         Ok(())
-    }.instrument(span.clone()).await;
+    }
+    .instrument(span.clone())
+    .await;
 
     // Enter the span, so that the error is logged with the span's metadata, if needed.
     let _guard = span.enter();
@@ -204,7 +218,7 @@ async fn test_tcp_connection() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     info!("⏳ Testing TCP connection ...");
-    
+
     let result = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(Config::bind_address())).await;
 
     let mut stream = match result {
@@ -212,11 +226,11 @@ async fn test_tcp_connection() {
         Ok(Err(err)) => {
             error!("❌ Error connecting to TCP server: {}", err);
             return;
-        },
+        }
         Err(_) => {
             error!("❌ Timeout connecting to TCP server");
             return;
-        },
+        }
     };
 
     // For our test connect, we attempt to read a `u8`.  If it times out, that's "good", since it means that this instance was likely able to
@@ -225,7 +239,7 @@ async fn test_tcp_connection() {
     // Therefore:
     // - Timeout: good.
     // - EOF: bad.
-    
+
     let result = tokio::time::timeout(Duration::from_secs(1), stream.read_u8()).await;
 
     match result {
@@ -236,7 +250,7 @@ async fn test_tcp_connection() {
             } else {
                 error!("❌ Another error occurred reading from TCP connection test (this may be OK): {}", err);
             }
-        },
+        }
         Err(_) => info!("✅ TCP connection test passed: connection is good."),
     }
 }
@@ -277,11 +291,11 @@ impl Config {
     fn get() -> &'static Self {
         CONFIG.get().unwrap()
     }
-    
+
     fn private_key() -> &'static str {
         Self::get().private_key.as_str()
     }
-    
+
     fn bind_address() -> &'static str {
         Self::get().bind_address.as_str()
     }
@@ -303,7 +317,7 @@ impl Config {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::utils::tests::{generate_test_fake_peer_public_key, MockStream};
+    use crate::utils::tests::{MockStream, generate_test_fake_peer_public_key};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -336,9 +350,9 @@ pub mod tests {
         Instance::prepare(key, "connect_address", tunnel_definition, false).unwrap();
 
         let mut stream = MockStream::new(vec![], vec![]);
-        
+
         send_preamble(&mut stream, peer_public_key).await.unwrap();
-        
+
         assert_eq!(stream.write, expected);
     }
 

@@ -1,18 +1,24 @@
-use std::{ops::{Deref, DerefMut}, pin::Pin, task::{Context, Poll}};
+use std::{
+    ops::{Deref, DerefMut},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader, SimplexStream};
 
-use crate::{base::{Constant, SharedSecret}, utils::{decrypt, encrypt, find_next_delimiter}};
+use crate::{
+    base::{Constant, SharedSecret},
+    utils::{decrypt, encrypt, find_next_delimiter},
+};
 
-pub struct BuffedStream<T>
-{
+pub struct BuffedStream<T> {
     inner: BufReader<T>,
     shared_secret: Option<SharedSecret>,
     decryption_stream: Option<BufReader<SimplexStream>>,
 }
 
 impl<T> BuffedStream<T>
-where 
+where
     T: AsyncRead,
 {
     pub fn new(stream: T) -> Self {
@@ -30,10 +36,7 @@ where
     }
 }
 
-impl<T> Unpin for BuffedStream<T>
-where 
-    T: Unpin,
-{}
+impl<T> Unpin for BuffedStream<T> where T: Unpin {}
 
 impl<T> Deref for BuffedStream<T> {
     type Target = BufReader<T>;
@@ -72,15 +75,11 @@ impl<T> From<BufReader<T>> for BuffedStream<T> {
 }
 
 impl<T> AsyncRead for BuffedStream<T>
-where 
+where
     T: AsyncRead + Unpin,
 {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        // In the unencrypted case, we can just read the data from the `BufReader`, 
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        // In the unencrypted case, we can just read the data from the `BufReader`,
         // and let it handle its internal structure.
         if self.shared_secret.is_none() {
             return Pin::new(&mut self.inner).poll_read(cx, buf);
@@ -104,14 +103,11 @@ where
 }
 
 impl<T> AsyncBufRead for BuffedStream<T>
-where 
+where
     T: AsyncRead + Unpin,
 {
-    fn poll_fill_buf(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<&[u8]>> {
-        // In the unencrypted case, we can just read the data from the `BufReader`, 
+    fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        // In the unencrypted case, we can just read the data from the `BufReader`,
         // and let it handle its internal structure.
         if self.shared_secret.is_none() {
             return Pin::new(&mut self.get_mut().inner).poll_fill_buf(cx);
@@ -126,7 +122,7 @@ where
 
         // In the case where we got more data, we need to decrypt it.
         if let Poll::Ready(Ok(data)) = result {
-            // If we read no data from the inner buffer, then we are "shutdown", 
+            // If we read no data from the inner buffer, then we are "shutdown",
             // so we should shutdown the write side of the `decryption_stream`, and
             // return the final poll result.
             if data.is_empty() {
@@ -135,7 +131,7 @@ where
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 }
-                
+
                 return Pin::new(self.get_mut().decryption_stream.as_mut().unwrap()).poll_fill_buf(cx);
             }
 
@@ -184,7 +180,7 @@ where
             pinned_inner.consume(delimiter_index + Constant::DELIMITER_SIZE);
         }
 
-        // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the 
+        // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the
         // decrypted stream, so we just offload onto its `poll_fill_buf` method.;
         Pin::new(self.get_mut().decryption_stream.as_mut().unwrap()).poll_fill_buf(cx)
     }
@@ -197,7 +193,7 @@ where
             return;
         }
 
-        // In the encrypted case, we only consume from the `decryption_stream`, since the 
+        // In the encrypted case, we only consume from the `decryption_stream`, since the
         // `inner` stream is consumed in the `poll_fill_buf` method.
 
         Pin::new(self.decryption_stream.as_mut().unwrap()).consume(amt)
@@ -205,20 +201,16 @@ where
 }
 
 impl<T> AsyncWrite for BuffedStream<T>
-where 
+where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         // In the unencrypted case, we can just write the data to the `BufReader`,
         // and let it handle its internal structure.
         if self.shared_secret.is_none() {
             return Pin::new(&mut self.inner).poll_write(cx, buf);
         }
-        
+
         // In the encrypted case, we need to encrypt the data, so use the
         // `poll_write` method to write to the underlying stream.
 
@@ -246,7 +238,10 @@ where
 
         // Check to make sure that the full write succeeded.
         if written < encrypted_packet.len() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Encrypted packet buffer overflow (on the inner stream): the author of this utility should add a flag to allow you to increase it")));
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Encrypted packet buffer overflow (on the inner stream): the author of this utility should add a flag to allow you to increase it",
+            )));
         }
 
         // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
@@ -273,9 +268,9 @@ mod tests {
     #[tokio::test]
     async fn test_unencrypted_buffed_stream() {
         let (client, mut server) = tokio::io::duplex(1024);
-        
+
         let mut client_stream = BuffedStream::new(client);
-        
+
         let data = b"Hello, world!";
 
         client_stream.write_all(data).await.unwrap();
@@ -293,7 +288,7 @@ mod tests {
 
         let (client, mut server) = tokio::io::duplex(1024);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
-        
+
         let data = b"Hello, world!";
 
         client_stream.write_all(data).await.unwrap();
@@ -312,7 +307,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
         let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
-        
+
         let data = b"Hello, world!";
 
         client_stream.write_all(data).await.unwrap();
@@ -331,7 +326,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
         let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
-        
+
         let data1 = b"Hello, world!";
         let data2 = b"Hello, world!";
 

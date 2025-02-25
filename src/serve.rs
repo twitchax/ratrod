@@ -2,10 +2,17 @@ use std::{marker::PhantomData, sync::OnceLock};
 
 use anyhow::Context;
 use regex::Regex;
-use tokio::{io::{AsyncBufRead, AsyncWriteExt}, net::{TcpListener, TcpStream}};
-use tracing::{error, info, info_span, Instrument};
+use tokio::{
+    io::{AsyncBufRead, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
+use tracing::{Instrument, error, info, info_span};
 
-use crate::{base::{Constant, EphemeralData, EphemeralKeyPair, Err, HandshakeData, Preamble, Res, Void}, buffed_stream::BuffedStream, utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge}};
+use crate::{
+    base::{Constant, EphemeralData, EphemeralKeyPair, Err, HandshakeData, Preamble, Res, Void},
+    buffed_stream::BuffedStream,
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge},
+};
 
 // State machine.
 
@@ -29,7 +36,6 @@ impl Instance<ConfigState> {
 
         Ok(Instance { _phantom: PhantomData })
     }
-    
 }
 
 impl Instance<ReadyState> {
@@ -43,19 +49,16 @@ impl Instance<ReadyState> {
 // Operations.
 
 async fn handle_handshake<T>(stream: &mut T, challenge: &[u8]) -> Res<HandshakeData>
-where 
+where
     T: AsyncBufRead + AsyncWriteExt + Unpin,
 {
     let preamble = process_preamble(stream).await?;
-    
+
     verify_preamble(stream, &preamble).await?;
     handle_and_validate_key_challenge(stream, challenge).await?;
     let ephemeral_key_pair = complete_handshake(stream).await?;
 
-    Ok(HandshakeData {
-        preamble,
-        ephemeral_key_pair,
-    })
+    Ok(HandshakeData { preamble, ephemeral_key_pair })
 }
 
 async fn verify_preamble<T>(stream: &mut T, preamble: &Preamble) -> Void
@@ -126,7 +129,9 @@ where
 {
     let ephemeral_key_pair = generate_ephemeral_key_pair()?;
 
-    stream.write_all(&[Constant::HANDSHAKE_COMPLETION, ephemeral_key_pair.public_key.as_ref(), Constant::DELIMITER].concat()).await?;
+    stream
+        .write_all(&[Constant::HANDSHAKE_COMPLETION, ephemeral_key_pair.public_key.as_ref(), Constant::DELIMITER].concat())
+        .await?;
     stream.flush().await?;
 
     info!("✅ Handshake completed.");
@@ -152,15 +157,15 @@ async fn handle_tcp(client: TcpStream) {
 
     let result: Void = async move {
         let peer_addr = client.get_ref().peer_addr().context("Error getting peer address")?;
-    
+
         info!("✅ Accepted connection from `{}`.", peer_addr);
-    
+
         // Create a challenge.
-    
+
         let challenge = generate_challenge();
-    
+
         // Handle the preamble.
-        
+
         let handshake_data = handle_handshake(&mut client, &challenge).await.context("Error handling handshake")?;
 
         // Compute the ephemeral data.
@@ -172,11 +177,11 @@ async fn handle_tcp(client: TcpStream) {
 
         // Extract the remote.
         let remote_address = handshake_data.preamble.remote;
-    
+
         // Connect to remote.
-        
+
         let mut remote = TcpStream::connect(&remote_address).await.context("Error connecting to remote")?;
-    
+
         info!("✅ Connected to remote server `{}`.", remote_address);
 
         // Generate and apply the shared secret, if needed.
@@ -186,21 +191,23 @@ async fn handle_tcp(client: TcpStream) {
             let challenge = ephemeral_data.challenge;
 
             let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
-            
+
             client = client.with_encryption(shared_secret);
             info!("🔒 Encryption applied ...");
         }
-    
+
         // Handle the TCP pump.
 
         info!("⛽ Pumping data between client and remote ...");
-    
+
         handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
 
         info!("✅ Connection closed.");
 
         Ok(())
-    }.instrument(span.clone()).await;
+    }
+    .instrument(span.clone())
+    .await;
 
     // Enter the span, so that the error is logged with the span's metadata, if needed.
     let _guard = span.enter();
@@ -271,7 +278,10 @@ impl Config {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use crate::utils::{generate_key_pair, prepare_preamble, sign_challenge, tests::{generate_test_fake_peer_public_key, MockStream}};
+    use crate::utils::{
+        generate_key_pair, prepare_preamble, sign_challenge,
+        tests::{MockStream, generate_test_fake_peer_public_key},
+    };
 
     use super::*;
 
@@ -285,9 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cannot_set_unparsable_host_regex() {
-        
-    }
+    fn test_cannot_set_unparsable_host_regex() {}
 
     #[tokio::test]
     async fn test_can_handle_handshake() {
@@ -299,7 +307,13 @@ mod tests {
         let challenge = generate_challenge();
         let signature = sign_challenge(&challenge, &keypair.private_key).unwrap();
 
-        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Constant::DELIMITER].concat();
+        let client_to_server = [
+            &prepare_preamble(remote, peer_public_key).unwrap(),
+            Constant::HANDSHAKE_CHALLENGE_RESPONSE,
+            &signature,
+            Constant::DELIMITER,
+        ]
+        .concat();
 
         let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
@@ -316,7 +330,13 @@ mod tests {
         let peer_public_key = &generate_test_fake_peer_public_key();
         let error_message = "Invalid handshake response";
 
-        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_COMPLETION, random_string(64).as_bytes(), Constant::DELIMITER].concat();
+        let client_to_server = [
+            &prepare_preamble(remote, peer_public_key).unwrap(),
+            Constant::HANDSHAKE_COMPLETION,
+            random_string(64).as_bytes(),
+            Constant::DELIMITER,
+        ]
+        .concat();
 
         let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
@@ -337,7 +357,13 @@ mod tests {
         let peer_public_key = &generate_test_fake_peer_public_key();
         let error_message = "Invalid signature length";
 
-        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, random_string(32).as_bytes(), Constant::DELIMITER].concat();
+        let client_to_server = [
+            &prepare_preamble(remote, peer_public_key).unwrap(),
+            Constant::HANDSHAKE_CHALLENGE_RESPONSE,
+            random_string(32).as_bytes(),
+            Constant::DELIMITER,
+        ]
+        .concat();
 
         let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
