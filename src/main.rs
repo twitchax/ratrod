@@ -53,7 +53,7 @@ async fn execute_command(command: Option<Command>) -> Void {
             serve::Instance::prepare(pair.public_key, remote_regex, bind, encrypt)?.start().await?;
         }
         Some(Command::Connect { server, tunnel, key, encrypt }) => {
-            connect::Instance::prepare(key, server, tunnel, encrypt)?.start().await?;
+            connect::Instance::prepare(key, server, &tunnel, encrypt)?.start().await?;
         }
         Some(Command::GenerateKeypair) => {
             let pair = utils::generate_key_pair().unwrap();
@@ -129,7 +129,7 @@ enum Command {
         /// This would usually take the form of the server's address, e.g., `192.168.1.100:3000`
         server: String,
 
-        /// Specifies the remote `client_port:host:remote_port` that the client wishes the server to route
+        /// Specifies the remote(s) (e.g., `client_port:host:remote_port`) that the client wishes the server to route
         /// the traffic to.
         ///
         /// This is the destination of the traffic, and is not
@@ -147,7 +147,7 @@ enum Command {
         /// - `3000:example.com:80`: - Requests to the client port 3000 route to `example.com:80` on the server.
         ///   This is for use cases where the client can contact the server, but not the remote host, so the server
         ///   must act as a TCP proxy.
-        tunnel: String,
+        tunnel: Vec<String>,
 
         /// Specifies an optional key to use for authentication from connecting clients.
         ///
@@ -190,7 +190,7 @@ mod tests {
     async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> String {
         let remote_address = format!("127.0.0.1:{}", port);
         let server_address = format!("127.0.0.1:{}", port + 1);
-        let client_tunnel = format!("{}:{}", port + 2, port);
+        let client_tunnels = [format!("{}:{}", port + 2, port)];
         let client_address = format!("127.0.0.1:{}", port + 2);
 
         // Start a "remote" echo server.
@@ -200,7 +200,7 @@ mod tests {
         tokio::spawn(serve::Instance::prepare(public_key, remote_regex, server_address.clone(), should_encrypt).unwrap().start());
 
         // Start a "client".
-        tokio::spawn(connect::Instance::prepare(private_key, server_address, client_tunnel, should_encrypt).unwrap().start());
+        tokio::spawn(connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
 
         // Give a moment for the server to start.
 
@@ -223,13 +223,13 @@ mod tests {
             })
         );
 
-        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "--key", "key"]);
+        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key", "key"]);
 
         assert_eq!(
             args.command,
             Some(Command::Connect {
                 server: "127.0.0.1:3000".to_string(),
-                tunnel: "3000:127.0.0.1:3000".to_string(),
+                tunnel: vec!["3000:127.0.0.1:3000".to_string(), "4000".to_string()],
                 key: "key".to_string(),
                 encrypt: false
             })
@@ -337,7 +337,7 @@ mod tests {
         let mut buffer = vec![0; message.len()];
         let result = client.read_exact(&mut buffer).await;
 
-        // intermediary disconnected because the key is bad.
+        // intermediary disconnected because the host is bad.
         assert!(result.is_err());
     }
 }

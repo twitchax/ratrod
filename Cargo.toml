@@ -9,14 +9,15 @@ repository = "https://github.com/twitchax/ratrod"
 
 [dependencies]
 tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
-clap = { version = "4.5.29", features = ["derive"] }
-anyhow = { version = "1.0.95" }
+clap = { version = "4.5.31", features = ["derive"] }
+anyhow = { version = "1.0.96" }
 rand = { version = "0.9.0", default-features = false, features = ["thread_rng"] }
 regex = { version = "1.11.1" }
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "ansi"] }
-ring = { version = "0.17.9", features = ["std"]}
+ring = { version = "0.17.11", features = ["std"]}
 base64 = { version = "0.22.1" }
+futures ={ version = "0.3.31" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

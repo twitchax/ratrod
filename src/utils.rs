@@ -151,6 +151,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         4 => {
             let bind_address = format!("{}:{}", parts[0], parts[1]);
             let host_address = format!("{}:{}", parts[2], parts[3]);
+
             Ok(TunnelDefinition {
                 bind_address,
                 remote_address: host_address,
@@ -159,6 +160,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         3 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("{}:{}", parts[1], parts[2]);
+
             Ok(TunnelDefinition {
                 bind_address,
                 remote_address: host_address,
@@ -167,6 +169,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         2 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("127.0.0.1:{}", parts[1]);
+            
             Ok(TunnelDefinition {
                 bind_address,
                 remote_address: host_address,
@@ -175,6 +178,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         1 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("127.0.0.1:{}", parts[0]);
+
             Ok(TunnelDefinition {
                 bind_address,
                 remote_address: host_address,
@@ -182,6 +186,13 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         }
         _ => Err(Err::msg("Invalid tunnel definition format")),
     }
+}
+
+pub fn parse_tunnel_definitions<T>(tunnels: &[T]) -> Res<Vec<TunnelDefinition>>
+where 
+    T: AsRef<str>,
+{
+    tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
 }
 
 pub fn prepare_preamble(remote: &str, peer_public_key: &PeerPublicKey) -> Res<Vec<u8>> {
@@ -257,9 +268,9 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = tokio::io::copy_bidirectional(a, b).await?;
+    let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
-    info!("➡️ {} bytes; ⬅️ {} bytes", result.0, result.1);
+    info!("➡️ {} bytes ⬅️ {} bytes", result.0, result.1);
 
     Ok(result)
 }
