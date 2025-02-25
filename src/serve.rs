@@ -2,10 +2,10 @@ use std::{marker::PhantomData, sync::OnceLock};
 
 use anyhow::Context;
 use regex::Regex;
-use tokio::{io::{AsyncBufRead, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
+use tokio::{io::{AsyncBufRead, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 use tracing::{error, info, info_span, Instrument};
 
-use crate::{base::{Err, Preamble, Res, Constant, Void}, utils::{generate_challenge, handle_tcp_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge}};
+use crate::{base::{Constant, EphemeralData, EphemeralKeyPair, Err, HandshakeData, Preamble, Res, Void}, buffed_stream::BuffedStream, utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, process_preamble, random_string, read_to_next_delimiter, validate_signed_challenge}};
 
 // State machine.
 
@@ -17,16 +17,15 @@ pub struct Instance<S = ConfigState> {
 }
 
 impl Instance<ConfigState> {
-    pub fn prepare<A, B, C, D>(private_key: A, public_key: B, remote_regex: C, bind_address: D, should_encrypt: bool) -> Res<Instance<ReadyState>>
+    pub fn prepare<A, B, C>(public_key: A, remote_regex: B, bind_address: C, should_encrypt: bool) -> Res<Instance<ReadyState>>
     where
         A: Into<String>,
-        B: Into<String>,
-        C: AsRef<str>,
-        D: Into<String>,
+        B: AsRef<str>,
+        C: Into<String>,
     {
         let remote_regex = Regex::new(remote_regex.as_ref()).context("Invalid regex for remote host.")?;
 
-        Config::create(private_key.into(), public_key.into(), bind_address.into(), remote_regex, should_encrypt)?;
+        Config::create(public_key.into(), bind_address.into(), remote_regex, should_encrypt)?;
 
         Ok(Instance { _phantom: PhantomData })
     }
@@ -43,20 +42,23 @@ impl Instance<ReadyState> {
 
 // Operations.
 
-async fn handle_handshake<T>(stream: &mut T, challenge: &[u8]) -> Res<Preamble>
+async fn handle_handshake<T>(stream: &mut T, challenge: &[u8]) -> Res<HandshakeData>
 where 
     T: AsyncBufRead + AsyncWriteExt + Unpin,
 {
     let preamble = process_preamble(stream).await?;
     
-    verify_preamble_host(stream, &preamble).await?;
+    verify_preamble(stream, &preamble).await?;
     handle_and_validate_key_challenge(stream, challenge).await?;
-    complete_handshake(stream).await?;
+    let ephemeral_key_pair = complete_handshake(stream).await?;
 
-    Ok(preamble)
+    Ok(HandshakeData {
+        preamble,
+        ephemeral_key_pair,
+    })
 }
 
-async fn verify_preamble_host<T>(stream: &mut T, preamble: &Preamble) -> Void
+async fn verify_preamble<T>(stream: &mut T, preamble: &Preamble) -> Void
 where
     T: AsyncWriteExt + Unpin,
 {
@@ -79,11 +81,12 @@ where
     info!("🚧 Sending handshake challenge to client ...");
 
     stream.write_all(&[Constant::HANDSHAKE_CHALLENGE, challenge, Constant::DELIMITER].concat()).await?;
+    stream.flush().await?;
 
     // Wait for the client to respond.
 
     let signature_response = read_to_next_delimiter(stream).await?;
-    let (signature_sentinel, signature) = signature_response.split_at(Constant::SIZE);
+    let (signature_sentinel, signature) = signature_response.split_at(Constant::DELIMITER_SIZE);
 
     if !signature_sentinel.eq(Constant::HANDSHAKE_CHALLENGE_RESPONSE) {
         let message = "Invalid handshake response";
@@ -117,14 +120,18 @@ where
     Ok(())
 }
 
-async fn complete_handshake<T>(stream: &mut T) -> Void
+async fn complete_handshake<T>(stream: &mut T) -> Res<EphemeralKeyPair>
 where
     T: AsyncWriteExt + Unpin,
 {
-    stream.write_all(&[Constant::HANDSHAKE_COMPLETION, Constant::DELIMITER].concat()).await?;
+    let ephemeral_key_pair = generate_ephemeral_key_pair()?;
+
+    stream.write_all(&[Constant::HANDSHAKE_COMPLETION, ephemeral_key_pair.public_key.as_ref(), Constant::DELIMITER].concat()).await?;
+    stream.flush().await?;
+
     info!("✅ Handshake completed.");
 
-    Ok(())
+    Ok(ephemeral_key_pair)
 }
 
 async fn run_tcp_server() -> Void {
@@ -138,16 +145,13 @@ async fn run_tcp_server() -> Void {
 }
 
 async fn handle_tcp(client: TcpStream) {
-    let mut client = BufReader::new(client);
+    let mut client = BuffedStream::new(client);
 
     let id = random_string(6);
     let span = info_span!("conn", id = id);
 
-    async move {
-        let Ok(peer_addr) = client.get_ref().peer_addr() else {
-            error!("❌ Unable to get peer address.");
-            return;
-        };
+    let result: Void = async move {
+        let peer_addr = client.get_ref().peer_addr().context("Error getting peer address")?;
     
         info!("✅ Accepted connection from `{}`.", peer_addr);
     
@@ -157,47 +161,56 @@ async fn handle_tcp(client: TcpStream) {
     
         // Handle the preamble.
         
-        let preamble = match handle_handshake(&mut client, &challenge).await {
-            Ok(preamble) => preamble,
-            Err(err) => {
-                let chain = err.chain().collect::<Vec<_>>();
-                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
-    
-                error!("❌ Error handling connection: {}.", full_chain);
-    
-                return;
-            }
+        let handshake_data = handle_handshake(&mut client, &challenge).await.context("Error handling handshake")?;
+
+        // Compute the ephemeral data.
+        let ephemeral_data = EphemeralData {
+            ephemeral_key_pair: handshake_data.ephemeral_key_pair,
+            peer_public_key: handshake_data.preamble.peer_public_key,
+            challenge,
         };
+
+        // Extract the remote.
+        let remote_address = handshake_data.preamble.remote;
     
         // Connect to remote.
         
-        // This does not need to be a `BufReader` because it is immediately
-        // handed off to the pump, which will do as it may with `copy`.
-        let mut remote = match TcpStream::connect(&preamble.remote).await {
-            Ok(remote) => remote,
-            Err(err) => {
-                let message = format!("Error connecting to remote server `{}`: `{}`.", preamble.remote, err);
-                error!("❌ {}", message);
-                return;
-            }
-        };
+        let mut remote = TcpStream::connect(&remote_address).await.context("Error connecting to remote")?;
     
-        info!("✅ Connected to remote server `{}`.", preamble.remote);
+        info!("✅ Connected to remote server `{}`.", remote_address);
+
+        // Generate and apply the shared secret, if needed.
+        if Config::should_encrypt() {
+            let private_key = ephemeral_data.ephemeral_key_pair.private_key;
+            let peer_public_key = ephemeral_data.peer_public_key;
+            let challenge = ephemeral_data.challenge;
+
+            let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
+            
+            client = client.with_encryption(shared_secret);
+            info!("🔒 Encryption applied ...");
+        }
+    
+        // Handle the TCP pump.
 
         info!("⛽ Pumping data between client and remote ...");
     
-        // Handle the TCP pump.
-    
-        match handle_tcp_pump(&mut client.into_inner(), &mut remote).await {
-            Ok(_) => info!("✅ Connection closed."),
-            Err(err) => {
-                let chain = err.chain().collect::<Vec<_>>();
-                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
-    
-                error!("❌ Error handling the pump: `{}`.", full_chain);
-            }
-        };
-    }.instrument(span).await;
+        handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
+
+        info!("✅ Connection closed.");
+
+        Ok(())
+    }.instrument(span.clone()).await;
+
+    // Enter the span, so that the error is logged with the span's metadata, if needed.
+    let _guard = span.enter();
+
+    if let Err(err) = result {
+        let chain = err.chain().collect::<Vec<_>>();
+        let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+
+        error!("❌ Error handling connection: {}.", full_chain);
+    }
 }
 
 // Statics.
@@ -205,7 +218,6 @@ async fn handle_tcp(client: TcpStream) {
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 struct Config {
-    private_key: String,
     public_key: String,
     bind_address: String,
     remote_regex: Regex,
@@ -213,13 +225,12 @@ struct Config {
 }
 
 impl Config {
-    fn create(private_key: String, public_key: String, bind_address: String, remote_regex: Regex, should_encrypt: bool) -> Res<&'static Self> {
+    fn create(public_key: String, bind_address: String, remote_regex: Regex, should_encrypt: bool) -> Res<&'static Self> {
         if Self::ready() {
             return Err(Err::msg("Configuration has already been set: only one config per process"));
         }
 
         let this = Self {
-            private_key,
             public_key,
             bind_address,
             remote_regex,
@@ -235,10 +246,6 @@ impl Config {
 
     fn get() -> &'static Self {
         CONFIG.get().unwrap()
-    }
-    
-    fn private_key() -> &'static str {
-        Self::get().private_key.as_str()
     }
 
     fn public_key() -> &'static str {
@@ -264,15 +271,14 @@ impl Config {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use crate::utils::{generate_key_pair, prepare_preamble, sign_challenge, tests::MockStream};
+    use crate::utils::{generate_key_pair, prepare_preamble, sign_challenge, tests::{generate_test_fake_peer_public_key, MockStream}};
 
     use super::*;
 
     #[test]
     fn test_prepare_config() {
-        Instance::prepare("private_key", "test_key", ".*", "foo", true).unwrap();
+        Instance::prepare("test_key", ".*", "foo", true).unwrap();
 
-        assert_eq!(Config::private_key(), "private_key");
         assert_eq!(Config::public_key(), "test_key");
         assert_eq!(Config::remote_regex().as_str(), ".*");
         assert_eq!(Config::bind_address(), "foo");
@@ -286,59 +292,63 @@ mod tests {
     #[tokio::test]
     async fn test_can_handle_handshake() {
         let keypair = generate_key_pair().unwrap();
+        let peer_public_key = &generate_test_fake_peer_public_key();
         let remote = "test_remote";
 
         // We need to compute the total stream from the client back to the server.
         let challenge = generate_challenge();
         let signature = sign_challenge(&challenge, &keypair.private_key).unwrap();
 
-        let client_to_server = [&prepare_preamble(remote).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Constant::DELIMITER].concat();
+        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Constant::DELIMITER].concat();
 
-        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
-        Instance::prepare("doesnt_matter_for_handshake", keypair.public_key, ".*", "", false).unwrap();
-        let preamble = handle_handshake(&mut stream, &challenge).await.unwrap();
+        Instance::prepare(keypair.public_key, ".*", "", false).unwrap();
+        let handshake_data = handle_handshake(&mut stream, &challenge).await.unwrap();
 
-        assert_eq!(preamble.remote, remote);
+        assert_eq!(handshake_data.preamble.remote, remote);
+        assert_eq!(&handshake_data.preamble.peer_public_key, peer_public_key);
     }
 
     #[tokio::test]
     async fn test_can_disallow_wrong_challenge_response() {
         let remote = "test_remote";
+        let peer_public_key = &generate_test_fake_peer_public_key();
         let error_message = "Invalid handshake response";
 
-        let client_to_server = [&prepare_preamble(remote).unwrap(), Constant::HANDSHAKE_COMPLETION, random_string(64).as_bytes(), Constant::DELIMITER].concat();
+        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_COMPLETION, random_string(64).as_bytes(), Constant::DELIMITER].concat();
 
-        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
-        Instance::prepare("key", "another", ".*", "", false).unwrap();
+        Instance::prepare("public_key", ".*", "", false).unwrap();
         let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
 
         assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
 
         let expected_write_stream = [Constant::ERROR_INVALID_KEY, error_message.as_bytes(), Constant::DELIMITER].concat();
 
-        let skip = Constant::SIZE + Constant::CHALLENGE_SIZE + Constant::SIZE;
+        let skip = Constant::DELIMITER_SIZE + Constant::CHALLENGE_SIZE + Constant::DELIMITER_SIZE;
         assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
     }
 
     #[tokio::test]
     async fn test_can_disallow_wrong_key_length() {
         let remote = "test_remote";
+        let peer_public_key = &generate_test_fake_peer_public_key();
         let error_message = "Invalid signature length";
 
-        let client_to_server = [&prepare_preamble(remote).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, random_string(32).as_bytes(), Constant::DELIMITER].concat();
+        let client_to_server = [&prepare_preamble(remote, peer_public_key).unwrap(), Constant::HANDSHAKE_CHALLENGE_RESPONSE, random_string(32).as_bytes(), Constant::DELIMITER].concat();
 
-        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
-        Instance::prepare("key", "another", ".*", "", false).unwrap();
+        Instance::prepare("public_key", ".*", "", false).unwrap();
         let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
 
         assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
 
         let expected_write_stream = [Constant::ERROR_INVALID_KEY, error_message.as_bytes(), Constant::DELIMITER].concat();
 
-        let skip = Constant::SIZE + Constant::CHALLENGE_SIZE + Constant::SIZE;
+        let skip = Constant::DELIMITER_SIZE + Constant::CHALLENGE_SIZE + Constant::DELIMITER_SIZE;
         assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
     }
 
@@ -346,13 +356,14 @@ mod tests {
     async fn test_can_disallow_bad_host() {
         let key = "test_key";
         let remote = "test_remote";
+        let peer_public_key = &generate_test_fake_peer_public_key();
         let error_message = "Invalid host from client (supplied `test_remote`, but need to satisfy `hots`)";
 
-        let client_to_server = prepare_preamble(remote).unwrap();
+        let client_to_server = prepare_preamble(remote, peer_public_key).unwrap();
 
-        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
-        Instance::prepare("doesnt_matter", key, "hots", "", false).unwrap();
+        Instance::prepare(key, "hots", "", false).unwrap();
         let preamble_result = handle_handshake(&mut stream, &generate_challenge()).await;
 
         assert_eq!(preamble_result.err().unwrap().to_string(), error_message);

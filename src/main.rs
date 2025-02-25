@@ -7,6 +7,7 @@ use base::{Err, Void};
 
 pub mod base;
 pub mod utils;
+pub mod buffed_stream;
 pub mod serve;
 pub mod connect;
 
@@ -52,7 +53,7 @@ async fn execute_command(command: Option<Command>) -> Void {
 
             info!("🚀 Starting server on `{}` ...", bind);
 
-            serve::Instance::prepare(pair.private_key, pair.public_key, remote_regex, bind, encrypt)?.start().await?;
+            serve::Instance::prepare(pair.public_key, remote_regex, bind, encrypt)?.start().await?;
         }
         Some(Command::Connect { server, tunnel, key, encrypt }) => {
             connect::Instance::prepare(key, server, tunnel, encrypt)?.start().await?;
@@ -193,7 +194,7 @@ mod tests {
         tokio::spawn(EchoServer::start(remote_address));
 
         // Start a "server".
-        tokio::spawn(serve::Instance::prepare(private_key.clone(), public_key, remote_regex, server_address.clone(), should_encrypt).unwrap().start());
+        tokio::spawn(serve::Instance::prepare(public_key, remote_regex, server_address.clone(), should_encrypt).unwrap().start());
 
         // Start a "client".
         tokio::spawn(connect::Instance::prepare(private_key, server_address, client_tunnel, should_encrypt).unwrap().start());
@@ -231,6 +232,34 @@ mod tests {
         // Send a message to the server.
         let message = b"Hello, world!";
         client.write_all(message).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        client.read_exact(&mut buffer).await.unwrap();
+
+        assert_eq!(buffer, message);
+
+        // Close the client connection.
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_e2e_encrypt() {
+        let remote_regex = ".*".to_string();
+        let port = 3100;
+
+        let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
+        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, true).await;
+
+        // Open a client connection.
+
+        let mut client = TcpStream::connect(&client_address).await.unwrap();
+
+        // Send a message to the server.
+        let message = b"Hello, world!";
+        client.write_all(message).await.unwrap();
+        client.flush().await.unwrap();
 
         // Read the message back from the server.
         let mut buffer = vec![0; message.len()];
@@ -245,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn test_e2e_bad_key() {
         let remote_regex = ".*".to_string();
-        let port = 3100;
+        let port = 3200;
 
         let Base64KeyPair { public_key, .. } = generate_key_pair().unwrap();
         let Base64KeyPair { private_key, .. } = generate_key_pair().unwrap();
@@ -258,6 +287,7 @@ mod tests {
         // Send a message to the server.
         let message = b"Hello, world!";
         client.write_all(message).await.unwrap();
+        client.flush().await.unwrap();
 
         // Read the message back from the server.
         let mut buffer = vec![0; message.len()];
@@ -270,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn test_e2e_bad_host() {
         let remote_regex = "not_127.0.0.1".to_string();
-        let port = 3200;
+        let port = 3300;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
         let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
@@ -282,6 +312,7 @@ mod tests {
         // Send a message to the server.
         let message = b"Hello, world!";
         client.write_all(message).await.unwrap();
+        client.flush().await.unwrap();
 
         // Read the message back from the server.
         let mut buffer = vec![0; message.len()];

@@ -1,9 +1,10 @@
 use std::{io::ErrorKind, marker::PhantomData, sync::OnceLock, time::Duration};
 
-use tokio::{io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader}, net::{TcpListener, TcpStream}};
+use anyhow::Context;
+use tokio::{io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 use tracing::{error, info, info_span, Instrument};
 
-use crate::{base::{Err, Res, Constant, Void}, utils::{handle_tcp_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
+use crate::{base::{Challenge, Constant, EphemeralData, Err, PeerPublicKey, Res, Void}, buffed_stream::BuffedStream, utils::{generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definition, prepare_preamble, random_string, read_to_next_delimiter, sign_challenge}};
 
 // State machine.
 
@@ -50,46 +51,57 @@ impl Instance<ReadyState> {
 
 // Operations.
 
-async fn handle_handshake<T>(stream: &mut T) -> Void
+async fn handle_handshake<T>(stream: &mut T) -> Res<EphemeralData>
 where 
     T: AsyncBufRead + AsyncWrite + Unpin,
 {
-    send_preamble(stream).await?;
-    handle_challenge(stream).await?;
+    let ephemeral_key_pair = generate_ephemeral_key_pair()?;
+    let peer_public_key = ephemeral_key_pair.public_key.as_ref().try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?;
+
+    send_preamble(stream, peer_public_key).await?;
+    let challenge = handle_challenge(stream).await?;
     
     // Await the handshake response.
 
     let data = handle_handshake_response(stream).await?;
-    if !data.is_empty() {
-        return Err(Err::msg("Handshake failed (completion message had data)"));
-    }
+
+    // Compute the ephemeral data.
+    let peer_public_key = data.try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?;
+    let ephemeral_data = EphemeralData {
+        ephemeral_key_pair,
+        peer_public_key,
+        challenge,
+    };
 
     info!("✅ Challenge accepted ...");
 
-    Ok(())
+    Ok(ephemeral_data)
 }
 
-async fn handle_challenge<T>(stream: &mut T) -> Void
+async fn handle_challenge<T>(stream: &mut T) -> Res<Challenge>
 where 
     T: AsyncBufRead + AsyncWrite + Unpin,
 {
-    let challenge = handle_handshake_response(stream).await?;
+    let challenge: Challenge = handle_handshake_response(stream).await?.try_into().map_err(|_| Err::msg("Could not convert challenge to array"))?;
     info!("🚧 Handshake challenge received ...");
 
     let signature = sign_challenge(&challenge, Config::private_key())?;
     stream.write_all(&[Constant::HANDSHAKE_CHALLENGE_RESPONSE, &signature, Constant::DELIMITER].concat()).await?;
+    stream.flush().await?;
 
     info!("⏳ Awaiting challenge validation ...");
 
-    Ok(())
+    Ok(challenge)
 }
 
-async fn send_preamble<T>(stream: &mut T) -> Void
+async fn send_preamble<T>(stream: &mut T, peer_public_key: &PeerPublicKey) -> Void
 where 
     T: AsyncWrite + Unpin,
 {
-    let preamble = prepare_preamble(Config::remote_address())?;
+    let preamble = prepare_preamble(Config::remote_address(), peer_public_key)?;
     stream.write_all(&preamble).await?;
+    stream.flush().await?;
+
     info!("✅ Sent preamble to server ...");
 
     Ok(())
@@ -102,20 +114,21 @@ where
     let buf = read_to_next_delimiter(stream).await?;
 
     if buf.starts_with(Constant::HANDSHAKE_COMPLETION) {
-        Ok(vec![])
+        let server_ephemeral_public_key = buf[Constant::DELIMITER_SIZE..].to_vec();
+        Ok(server_ephemeral_public_key)
     } else if buf.starts_with(Constant::HANDSHAKE_CHALLENGE) {
         if !buf.starts_with(Constant::HANDSHAKE_CHALLENGE) {
             return Err(Err::msg("Handshake failed (challenge message did not start with the expected sentinel)"));
         }
 
-        let challenge = buf[Constant::SIZE..].to_vec();
+        let challenge = buf[Constant::DELIMITER_SIZE..].to_vec();
         Ok(challenge)
     } else if buf.starts_with(Constant::ERROR_INVALID_KEY) {
-        let message = String::from_utf8(buf[Constant::SIZE..].to_vec())?;
+        let message = String::from_utf8(buf[Constant::DELIMITER_SIZE..].to_vec())?;
 
         Err(Err::msg(format!("Handshake failed (invalid key): {}", message)))
     } else if buf.starts_with(Constant::ERROR_INVALID_HOST) {
-        let message = String::from_utf8(buf[Constant::SIZE..].to_vec())?;
+        let message = String::from_utf8(buf[Constant::DELIMITER_SIZE..].to_vec())?;
 
         Err(Err::msg(format!("Handshake failed (invalid host): {}", message)))
     } else {
@@ -133,42 +146,51 @@ async fn run_tcp_server() -> Void {
     }
 }
 
-async fn handle_tcp(mut local: TcpStream) -> Void {
+async fn handle_tcp(mut local: TcpStream) {
     let id = random_string(6);
     let span = info_span!("conn", id = id);
 
-    async move {
+    let result: Void = async move {
         // Connect to the server.
-        let mut remote = BufReader::new(remote_connect_tcp().await?);
+        let mut remote = BuffedStream::new(remote_connect_tcp().await?);
 
         // Handle the handshake.
-        match handle_handshake(&mut remote).await {
-            Ok(_) => info!("✅ Handshake successful: connection established!"),
-            Err(err) => {
-                let chain = err.chain().collect::<Vec<_>>();
-                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+        let ephemeral_data = handle_handshake(&mut remote).await.context("Error handling handshake")?;
 
-                error!("❌ Error handling the handshake: {}.", full_chain);
-                return Err(err);
-            }
-        };
+        info!("✅ Handshake successful: connection established!");
+
+        // Generate and apply the shared secret, if needed.
+        if Config::should_encrypt() {
+            let private_key = ephemeral_data.ephemeral_key_pair.private_key;
+            let peer_public_key = ephemeral_data.peer_public_key;
+            let challenge = ephemeral_data.challenge;
+
+            let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
+            
+            remote = remote.with_encryption(shared_secret);
+            info!("🔒 Encryption applied ...");
+        }
+
+        // Handle the TCP pump.
 
         info!("⛽ Pumping data between client and remote ...");
 
-        // Handle the TCP pump.
-        match handle_tcp_pump(&mut local, &mut remote.into_inner()).await {
-            Ok(_) => info!("✅ Connection closed."),
-            Err(err) => {
-                let chain = err.chain().collect::<Vec<_>>();
-                let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+        handle_pump(&mut local, &mut remote).await.context("Error handling pump")?;
 
-                error!("❌ Error handling the pump: {}.", full_chain);
-                return Err(err);
-            }
-        };
+        info!("✅ Connection closed.");
 
         Ok(())
-    }.instrument(span).await
+    }.instrument(span.clone()).await;
+
+    // Enter the span, so that the error is logged with the span's metadata, if needed.
+    let _guard = span.enter();
+
+    if let Err(err) = result {
+        let chain = err.chain().collect::<Vec<_>>();
+        let full_chain = chain.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join(" => ");
+
+        error!("❌ Error handling the connection: {}.", full_chain);
+    }
 }
 
 async fn remote_connect_tcp() -> Res<TcpStream> {
@@ -281,7 +303,7 @@ impl Config {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::utils::tests::MockStream;
+    use crate::utils::tests::{generate_test_fake_peer_public_key, MockStream};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -304,22 +326,25 @@ pub mod tests {
     #[tokio::test]
     async fn test_send_preamble() {
         let key = "key";
+        let peer_public_key = &generate_test_fake_peer_public_key();
+
         let remote_address = "remote_address:3000";
         let tunnel_definition = format!("a:b:{}", remote_address);
-        let expected = prepare_preamble(remote_address).unwrap();
+
+        let expected = prepare_preamble(remote_address, peer_public_key).unwrap();
 
         Instance::prepare(key, "connect_address", tunnel_definition, false).unwrap();
 
         let mut stream = MockStream::new(vec![], vec![]);
         
-        send_preamble(&mut stream).await.unwrap();
+        send_preamble(&mut stream, peer_public_key).await.unwrap();
         
         assert_eq!(stream.write, expected);
     }
 
     #[tokio::test]
     async fn test_handle_handshake_response() {
-        let mut stream = BufReader::new(MockStream::new([Constant::HANDSHAKE_COMPLETION, Constant::DELIMITER].concat(), vec![]));
+        let mut stream = BuffedStream::new(MockStream::new([Constant::HANDSHAKE_COMPLETION, Constant::DELIMITER].concat(), vec![]));
 
         handle_handshake_response(&mut stream).await.unwrap();
     }
@@ -327,7 +352,7 @@ pub mod tests {
     #[tokio::test]
     async fn handle_failed_key_handshake_response() {
         let message = "foo";
-        let mut stream = BufReader::new(MockStream::new([Constant::ERROR_INVALID_KEY, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
+        let mut stream = BuffedStream::new(MockStream::new([Constant::ERROR_INVALID_KEY, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 
@@ -338,7 +363,7 @@ pub mod tests {
     #[tokio::test]
     async fn handle_failed_host_handshake_response() {
         let message = "foo";
-        let mut stream = BufReader::new(MockStream::new([Constant::ERROR_INVALID_HOST, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
+        let mut stream = BuffedStream::new(MockStream::new([Constant::ERROR_INVALID_HOST, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 
@@ -348,7 +373,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn handle_failed_unknown_handshake_response() {
-        let mut stream = BufReader::new(MockStream::new([&[0x00], Constant::DELIMITER].concat(), vec![]));
+        let mut stream = BuffedStream::new(MockStream::new([&[0x00], Constant::DELIMITER].concat(), vec![]));
 
         let result = handle_handshake_response(&mut stream).await;
 

@@ -3,11 +3,11 @@ use std::time::Duration;
 use anyhow::Context;
 use base64::Engine;
 use rand::{distr::Alphanumeric, Rng};
-use ring::{aead::{Aad, LessSafeKey, Nonce, UnboundKey}, hkdf::Salt, rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey}};
-use tokio::{io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite}, net::TcpStream};
-use tracing::debug;
+use ring::{aead::{Aad, LessSafeKey, Nonce, UnboundKey}, agreement::{agree_ephemeral, EphemeralPrivateKey}, hkdf::Salt, rand::{SecureRandom, SystemRandom}, signature::{Ed25519KeyPair, KeyPair}};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite};
+use tracing::{debug, info};
 
-use crate::base::{Base64KeyPair, EncryptedData, Err, Preamble, Res, Constant, TunnelDefinition, Void};
+use crate::base::{Base64KeyPair, Challenge, Constant, EncryptedData, EphemeralKeyPair, PeerPublicKey, Err, Preamble, Res, SharedSecret, SharedSecretNonce, Signature, TunnelDefinition, Void};
 
 pub fn random_string(len: usize) -> String {
     rand::rng()
@@ -39,14 +39,14 @@ pub fn generate_key_pair_from_key(private_key: &str) -> Res<Base64KeyPair> {
     Ok(Base64KeyPair { public_key: public, private_key: private_key.to_string() })
 }
 
-pub fn generate_challenge() -> [u8; Constant::CHALLENGE_SIZE] {
+pub fn generate_challenge() -> Challenge {
     let rng = SystemRandom::new();
-    let mut challenge = [0u8; Constant::CHALLENGE_SIZE];
+    let mut challenge = Challenge::default();
     rng.fill(&mut challenge).expect("Failed to generate challenge");
     challenge
 }
 
-pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<[u8; Constant::SIGNATURE_SIZE]> {
+pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<Signature> {
     debug!("Challenge: `{:?}`", challenge);
     
     let private_key = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
@@ -61,15 +61,33 @@ pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<[u8; Constant:
     Ok(signature)
 }
 
-pub fn generate_chacha_key(private_key: &str, challenge: &[u8]) -> Res<[u8; Constant::CHACHA20_KEY_SIZE]> {
-    let private_key_bytes = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
+pub fn generate_ephemeral_key_pair() -> Res<EphemeralKeyPair> {
+    let rng = SystemRandom::new();
+
+    let my_private_key = EphemeralPrivateKey::generate(Constant::AGREEMENT, &rng)?;
+
+    let public_key = my_private_key.compute_public_key()?;
+
+    Ok(EphemeralKeyPair { public_key, private_key: my_private_key })
+}
+
+pub fn generate_shared_secret(private_key: EphemeralPrivateKey, peer_public_key: &PeerPublicKey, challenge: &Challenge) -> Res<SharedSecret> {
+    let unparsed_peer_public_key = ring::agreement::UnparsedPublicKey::new(Constant::AGREEMENT, peer_public_key);
+    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| {
+        generate_chacha_key(shared_secret, challenge)
+    })??;
+
+    Ok(shared_secret)
+}
+
+fn generate_chacha_key(private_key: &[u8], challenge: &[u8]) -> Res<SharedSecret> {
     let salt = Salt::new(Constant::KDF, challenge);
     let info = &[challenge];
 
-    let prk = salt.extract(&private_key_bytes);
+    let prk = salt.extract(private_key);
     let okm = prk.expand(info, Constant::KDF)?;
 
-    let mut key = [0u8; Constant::CHACHA20_KEY_SIZE];
+    let mut key = SharedSecret::default();
     okm.fill(&mut key)?;
 
     Ok(key)
@@ -77,7 +95,7 @@ pub fn generate_chacha_key(private_key: &str, challenge: &[u8]) -> Res<[u8; Cons
 
 pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
     let rng = SystemRandom::new();
-    let mut nonce_bytes = [0u8; Constant::CHACHA20_NONCE_SIZE];
+    let mut nonce_bytes = [0u8; Constant::SHARED_SECRET_NONCE_SIZE];
     rng.fill(&mut nonce_bytes).context("Could not fill nonce for encryption")?;
 
     let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for encryption")?;
@@ -95,7 +113,7 @@ pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
     })
 }
 
-pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &[u8; Constant::CHACHA20_NONCE_SIZE]) -> Res<Vec<u8>> {
+pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &SharedSecretNonce) -> Res<Vec<u8>> {
     let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for decryption")?;
     let opening_key = LessSafeKey::new(unbound_key);
     let nonce = Nonce::assume_unique_for_key(*nonce_bytes);
@@ -109,7 +127,7 @@ pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &[u8; Constant
 pub fn validate_signed_challenge(challenge: &[u8], signature: &[u8], public_key: &str) -> Void {
     let public_key = Constant::BASE64_ENGINE.decode(public_key).context("Could not decode public key")?;
 
-    let unparsed_public_key = UnparsedPublicKey::new(&ring::signature::ED25519, public_key);
+    let unparsed_public_key = ring::signature::UnparsedPublicKey::new(Constant::SIGNATURE, public_key);
 
     unparsed_public_key.verify(challenge, signature).context("Invalid signature")?;
 
@@ -150,10 +168,10 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
     }
 }
 
-pub fn prepare_preamble(remote: &str) -> Res<Vec<u8>> {
+pub fn prepare_preamble(remote: &str, peer_public_key: &PeerPublicKey) -> Res<Vec<u8>> {
     let remote_bytes = remote.as_bytes();
 
-    let preamble = [Constant::PREAMBLE_INIT, remote_bytes, Constant::DELIMITER].concat();
+    let preamble = [Constant::PREAMBLE_INIT, remote_bytes, Constant::DELIMITER, peer_public_key, Constant::DELIMITER].concat();
 
     Ok(preamble)
 }
@@ -165,7 +183,7 @@ where
 {
     let data = read_to_next_delimiter(stream).await?;
 
-    let (init, remote_bytes) = data.split_at(Constant::SIZE);
+    let (init, remote_bytes) = data.split_at(Constant::DELIMITER_SIZE);
 
     if init != Constant::PREAMBLE_INIT {
         return Err(Err::msg("Invalid preamble"));
@@ -173,7 +191,13 @@ where
 
     let remote = String::from_utf8(remote_bytes.to_vec()).context("Invalid UTF-8 in preamble")?;
 
-    Ok(Preamble { remote })
+    let peer_public_key = read_to_next_delimiter(stream).await?.try_into().map_err(|_| Err::msg("Invalid ephemeral public key length"))?;
+
+    Ok(Preamble { remote, peer_public_key })
+}
+
+pub fn find_next_delimiter(data: &[u8]) -> Option<usize> {
+    data.windows(Constant::DELIMITER_SIZE).position(|window| window == Constant::DELIMITER)
 }
 
 pub async fn read_to_next_delimiter<T>(stream: &mut T) -> Res<Vec<u8>>
@@ -188,7 +212,7 @@ where
 
         // Find next delimiter.
 
-        for (k, window) in inner_buffer.windows(Constant::SIZE).enumerate() {
+        for (k, window) in inner_buffer.windows(Constant::DELIMITER_SIZE).enumerate() {
             if window == Constant::DELIMITER {
                 delimiter_index = k;
                 break;
@@ -208,47 +232,29 @@ where
     }
 
     // Consume the data.
-    stream.consume(delimiter_index + Constant::SIZE);
+    stream.consume(delimiter_index + Constant::DELIMITER_SIZE);
 
     Ok(buffer)
 }
 
-pub async fn handle_tcp_pump(client: &mut TcpStream, remote: &mut TcpStream) -> Void {
-    let (mut remote_reader, mut remote_writer) = remote.split();
-    let (mut client_reader, mut client_writer) = client.split();
-    
-    handle_pump(&mut client_reader, &mut client_writer, &mut remote_reader, &mut remote_writer).await?;
-
-    Ok(())
-}
-
-async fn handle_pump<'a, 'b, R, W>(
-    reader_left: &'a mut R,
-    writer_left: &'b mut W,
-    reader_right: &'b mut R,
-    writer_right: &'a mut W,
-) -> Res<()>
+pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = tokio::select!(
-        r = tokio::io::copy(reader_left, writer_right) => r,
-        r = tokio::io::copy(reader_right, writer_left) => r
-    );
+    let result = tokio::io::copy_bidirectional(a, b).await?;
+    
+    info!("➡️ {} bytes; ⬅️ {} bytes", result.0, result.1);
 
-    if let Err(err) = result {
-        let message = format!("Error during TCP pumping: `{}`", err);
-        return Err(Err::msg(message));
-    }
-
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]
 pub mod tests {
     use std::{io, pin::Pin, task::{Context, Poll}, vec};
-    use tokio::io::BufReader;
+    use tokio::io::AsyncWriteExt;
+
+    use crate::buffed_stream::BuffedStream;
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -310,6 +316,24 @@ pub mod tests {
         }
     }
 
+    pub fn generate_test_ephemeral_key_pair() -> EphemeralKeyPair {
+        generate_ephemeral_key_pair().unwrap()
+    }
+
+    pub fn generate_test_shared_secret() -> SharedSecret {
+        let ephemeral_key_pair = generate_test_ephemeral_key_pair();
+        let challenge = generate_challenge();
+
+        generate_shared_secret(ephemeral_key_pair.private_key, ephemeral_key_pair.public_key.as_ref().try_into().unwrap(), &challenge).unwrap()
+    }
+
+    pub fn generate_test_fake_peer_public_key() -> PeerPublicKey {
+        b"this needs to be exactly 32 byte"
+            .as_ref()
+            .try_into()
+            .unwrap()
+    }
+
     #[test]
     fn test_generate_key_pair() {
         let key_pair = generate_key_pair().unwrap();
@@ -336,26 +360,25 @@ pub mod tests {
     }
 
     #[test]
-    fn test_generate_chacha20_key() {
-        let private_key = generate_key_pair().unwrap().private_key;
+    fn test_ephemeral_key_exchange() {
+        let ephemeral_key_pair_1 = generate_ephemeral_key_pair().unwrap();
+        let ephemeral_key_pair_2 = generate_ephemeral_key_pair().unwrap();
         let challenge = generate_challenge();
 
-        let chacha20_key_1 = generate_chacha_key(&private_key, &challenge).unwrap();
-        let chacha20_key_2 = generate_chacha_key(&private_key, &challenge).unwrap();
+        let shared_secret_1 = generate_shared_secret(ephemeral_key_pair_1.private_key, ephemeral_key_pair_2.public_key.as_ref().try_into().unwrap(), &challenge).unwrap();
+        let shared_secret_2 = generate_shared_secret(ephemeral_key_pair_2.private_key, ephemeral_key_pair_1.public_key.as_ref().try_into().unwrap(), &challenge).unwrap();
 
-        assert_eq!(chacha20_key_1.len(), Constant::CHACHA20_KEY_SIZE);
-        assert_eq!(chacha20_key_1, chacha20_key_2);
+        assert_eq!(shared_secret_1.len(), Constant::SHARED_SECRET_SIZE);
+        assert_eq!(shared_secret_1, shared_secret_2);
     }
 
     #[test]
     fn test_encrypt_decrypt() {
-        let private_key = generate_key_pair().unwrap().private_key;
-        let challenge = generate_challenge();
-        let chacha20_key = generate_chacha_key(&private_key, &challenge).unwrap();
+        let shared_secret = generate_test_shared_secret();
 
         let plaintext = b"Hello, world!";
-        let encrypted_data = encrypt(&chacha20_key, plaintext).unwrap();
-        let decrypted_data = decrypt(&chacha20_key, &encrypted_data.data, &encrypted_data.nonce).unwrap();
+        let encrypted_data = encrypt(&shared_secret, plaintext).unwrap();
+        let decrypted_data = decrypt(&shared_secret, &encrypted_data.data, &encrypted_data.nonce).unwrap();
 
         assert_eq!(decrypted_data, plaintext);
     }
@@ -395,19 +418,21 @@ pub mod tests {
     #[test]
     fn test_prepare_preamble() {
         let remote = "test_remote";
+        let peer_public_key = &generate_test_fake_peer_public_key();
 
-        let preamble = prepare_preamble(remote).unwrap();
+        let preamble = prepare_preamble(remote, peer_public_key).unwrap();
 
-        assert_eq!(preamble.len(), remote.len() + 2 * Constant::SIZE);
+        assert_eq!(preamble.len(), remote.len() + peer_public_key.len() + 3 * Constant::DELIMITER_SIZE);
     }
 
     #[tokio::test]
     async fn test_process_preamble() {
         let remote = "test_remote";
+        let peer_public_key = &generate_test_fake_peer_public_key();
 
-        let client_to_server = prepare_preamble(remote).unwrap();
+        let client_to_server = prepare_preamble(remote, peer_public_key).unwrap();
 
-        let mut stream = BufReader::new(MockStream::new(client_to_server, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
 
         let preamble = process_preamble(&mut stream).await.unwrap();
 
@@ -416,21 +441,25 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_handle_pump() {
-        let mut client = MockStream::new(vec![1, 2, 3], vec![]);
+        let (mut client, mut server1) = tokio::io::duplex(1024);
+        let (mut server2, mut remote) = tokio::io::duplex(1024);
 
-        let mut remote = MockStream::new(vec![4, 5, 6], vec![]);
+        client.write_all(b"Hello, remote!").await.unwrap();
+        client.shutdown().await.unwrap();
+        remote.write_all(b"Hello, client!!").await.unwrap();
+        remote.shutdown().await.unwrap();
+        
+        let (up, down) = handle_pump(&mut server1, &mut server2).await.unwrap();
 
-        // Just test that the pump closes successfully.  The mock doesn't work great here
-        // because each side is sort of "already closed" because it has finite data.
-        // But it does test that the pump doesn't panic or error.
-        handle_pump(&mut client.read.as_slice(), &mut client.write, &mut remote.read.as_slice(), &mut remote.write).await.unwrap();
+        assert_eq!(up, 14);
+        assert_eq!(down, 15);
     }
 
     #[tokio::test]
     async fn test_read_to_next_delimiter() {
         let message = b"Hello, world!";
         let data = [message, Constant::DELIMITER].concat();
-        let mut stream = BufReader::new(MockStream::new(data, vec![]));
+        let mut stream = BuffedStream::new(MockStream::new(data, vec![]));
 
         let result = read_to_next_delimiter(&mut stream).await.unwrap();
 
