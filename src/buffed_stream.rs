@@ -220,10 +220,9 @@ where
         }
         
         // In the encrypted case, we need to encrypt the data, so use the
-        // `poll_write` method to get the data through the `BufReader`'s
-        // internal logic, and then encrypt it.
+        // `poll_write` method to write to the underlying stream.
 
-        // First, we need to pare down the data to the maximum size of the encrypted data.
+        // First, we need to pare down the data to the maximum size of the encrypted data, if needed.
         let max_size = Constant::BUFFER_SIZE - Constant::ENCRYPTION_OVERHEAD;
         let amt = std::cmp::min(buf.len(), max_size);
         let buf = &buf[..amt];
@@ -246,11 +245,11 @@ where
         };
 
         // Check to make sure that the full write succeeded.
-        if dbg!(written) < dbg!(encrypted_packet.len()) {
+        if written < encrypted_packet.len() {
             return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Encrypted packet buffer overflow (on the inner stream): the author of this utility should add a flag to allow you to increase it")));
         }
 
-        // Need to report that the requested amount of data was written, not the _actual_ amount written to the inner stream.
+        // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
         Poll::Ready(Ok(buf.len()))
     }
 
