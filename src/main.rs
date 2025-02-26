@@ -187,11 +187,11 @@ mod tests {
         net::TcpStream,
     };
 
-    async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> String {
+    async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> [String; 2] {
         let remote_address = format!("127.0.0.1:{}", port);
         let server_address = format!("127.0.0.1:{}", port + 1);
-        let client_tunnels = [format!("{}:{}", port + 2, port)];
-        let client_address = format!("127.0.0.1:{}", port + 2);
+        let client_tunnels = [format!("{}:{}", port + 2, port), format!("{}:{}", port + 3, port)];
+        let client_addresses = [format!("127.0.0.1:{}", port + 2), format!("127.0.0.1:{}", port + 3)];
 
         // Start a "remote" echo server.
         tokio::spawn(EchoServer::start(remote_address));
@@ -206,7 +206,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        client_address
+        client_addresses
     }
 
     #[test]
@@ -242,11 +242,11 @@ mod tests {
         let port = 3000;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
-        let mut client = TcpStream::connect(&client_address).await.unwrap();
+        let mut client = TcpStream::connect(&client_addresses[0]).await.unwrap();
 
         // Send a message to the server.
         let message = b"Hello, world!";
@@ -269,11 +269,11 @@ mod tests {
         let port = 3100;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, true).await;
+        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, true).await;
 
         // Open a client connection.
 
-        let mut client = TcpStream::connect(&client_address).await.unwrap();
+        let mut client = TcpStream::connect(&client_addresses[1]).await.unwrap();
 
         // Send a message to the server.
         let message = b"Hello, world!";
@@ -297,11 +297,11 @@ mod tests {
 
         let Base64KeyPair { public_key, .. } = generate_key_pair().unwrap();
         let Base64KeyPair { private_key, .. } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
-        let mut client = TcpStream::connect(&client_address).await.unwrap();
+        let mut client = TcpStream::connect(&client_addresses[0]).await.unwrap();
 
         // Send a message to the server.
         let message = b"Hello, world!";
@@ -322,11 +322,11 @@ mod tests {
         let port = 3300;
 
         let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_address = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
 
         // Open a client connection.
 
-        let mut client = TcpStream::connect(&client_address).await.unwrap();
+        let mut client = TcpStream::connect(&client_addresses[0]).await.unwrap();
 
         // Send a message to the server.
         let message = b"Hello, world!";
