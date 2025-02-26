@@ -45,14 +45,17 @@ impl Instance<ReadyState> {
 
         // Finally, start the server(s) (one per tunnel definition).
 
-        let tasks = Config::tunnel_definitions().iter().map(|tunnel_definition| {
-            // Schedule a test connection.
-            tokio::spawn(test_tcp_connection(&tunnel_definition.bind_address));
+        let tasks = Config::tunnel_definitions()
+            .iter()
+            .map(|tunnel_definition| {
+                // Schedule a test connection.
+                tokio::spawn(test_tcp_connection(&tunnel_definition.bind_address));
 
-            // Start the server.
-            tokio::spawn(run_tcp_server(tunnel_definition))
-        }).collect::<Vec<_>>();
-        
+                // Start the server.
+                tokio::spawn(run_tcp_server(tunnel_definition))
+            })
+            .collect::<Vec<_>>();
+
         // Basically, only crash if _all_ of the servers fail to start.  Otherwise, the user can use the error logs to see that some of the
         // servers failed to start.
         futures::future::join_all(tasks).await;
@@ -164,7 +167,8 @@ async fn run_tcp_server(tunnel_definition: &'static TunnelDefinition) {
 
             tokio::spawn(handle_tcp(socket, &tunnel_definition.remote_address));
         }
-    }.await;
+    }
+    .await;
 
     if let Err(err) = result {
         error!("❌ Error starting TCP server, or accepting a connection (shutting down listener for this bind address): {}", err);
@@ -264,7 +268,7 @@ async fn test_tcp_connection(bind_address: &'static str) {
                 error!("❌ Another error occurred reading from TCP connection test (this may be OK): {}", err);
             }
         }
-        Err(_) => {},
+        Err(_) => {}
     }
 }
 
@@ -310,7 +314,7 @@ impl Config {
     fn connect_address() -> &'static str {
         Self::get().connect_address.as_str()
     }
-    
+
     fn tunnel_definitions() -> &'static [TunnelDefinition] {
         Self::get().tunnel_definitions.as_slice()
     }

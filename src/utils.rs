@@ -169,7 +169,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
         2 => {
             let bind_address = format!("127.0.0.1:{}", parts[0]);
             let host_address = format!("127.0.0.1:{}", parts[1]);
-            
+
             Ok(TunnelDefinition {
                 bind_address,
                 remote_address: host_address,
@@ -189,7 +189,7 @@ pub fn parse_tunnel_definition(tunnel: &str) -> Res<TunnelDefinition> {
 }
 
 pub fn parse_tunnel_definitions<T>(tunnels: &[T]) -> Res<Vec<TunnelDefinition>>
-where 
+where
     T: AsRef<str>,
 {
     tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
