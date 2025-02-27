@@ -1,14 +1,17 @@
 use std::{
-    ops::{Deref, DerefMut},
+    ops::Deref,
     pin::Pin,
     task::{Context, Poll, ready},
 };
 
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader, SimplexStream};
+use async_bincode::{AsyncDestination, tokio::AsyncBincodeStream};
+use futures::{Sink, Stream};
+use tokio::io::{AsyncRead, AsyncWrite, SimplexStream};
 
 use crate::{
     base::{Constant, SharedSecret},
-    utils::{decrypt, encrypt, find_next_delimiter},
+    protocol::{BincodeReceive, BincodeSend, ProtocolMessage},
+    utils::{decrypt, encrypt},
 };
 
 // Macros.
@@ -28,44 +31,44 @@ macro_rules! take_pinned_inner {
 }
 
 /// Macro to get a ref to `Pin<&mut BuffedStream<T>>` and return the decryption stream `Pin<&mut BufReader<SimplexStream>>`.
-macro_rules! pinned_decryption_stream {
+macro_rules! pinned_read_stream {
     ($self:ident) => {
-        Pin::new($self.decryption_stream.as_mut().unwrap())
+        Pin::new($self.read_stream.as_mut().unwrap())
     };
 }
 
 /// Macro to take a `Pin<&mut BuffedStream<T>>` and return the decryption stream `Pin<&mut BufReader<SimplexStream>>`.
-macro_rules! take_pinned_decryption_stream {
+macro_rules! take_pinned_read_stream {
     ($self:ident) => {
-        Pin::new($self.get_mut().decryption_stream.as_mut().unwrap())
+        Pin::new($self.get_mut().read_stream.as_mut().unwrap())
     };
 }
 
 // Type.
 
 pub struct BuffedStream<T> {
-    inner: BufReader<T>,
+    inner: AsyncBincodeStream<T, ProtocolMessage, ProtocolMessage, AsyncDestination>,
     shared_secret: Option<SharedSecret>,
-    decryption_stream: Option<BufReader<SimplexStream>>,
+    read_stream: Option<SimplexStream>,
 }
 
 // Impl.
 
 impl<T> BuffedStream<T>
 where
-    T: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
     pub fn new(stream: T) -> Self {
         Self {
-            inner: BufReader::with_capacity(Constant::BUFFER_SIZE, stream),
+            inner: AsyncBincodeStream::from(stream).for_async(),
             shared_secret: None,
-            decryption_stream: None,
+            read_stream: None,
         }
     }
 
     pub fn with_encryption(mut self, shared_secret: SharedSecret) -> Self {
         self.shared_secret = Some(shared_secret);
-        self.decryption_stream = Some(BufReader::new(SimplexStream::new_unsplit(Constant::BUFFER_SIZE)));
+        self.read_stream = Some(SimplexStream::new_unsplit(Constant::BUFFER_SIZE));
 
         self
     }
@@ -76,38 +79,64 @@ where
 impl<T> Unpin for BuffedStream<T> where T: Unpin {}
 
 impl<T> Deref for BuffedStream<T> {
-    type Target = BufReader<T>;
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner.get_ref()
     }
 }
 
-impl<T> DerefMut for BuffedStream<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+impl<T> From<T> for BuffedStream<T>
+where
+    T: BincodeSend + BincodeReceive,
+{
+    fn from(buf: T) -> Self {
+        Self::new(buf)
     }
 }
 
-impl<T> AsRef<BufReader<T>> for BuffedStream<T> {
-    fn as_ref(&self) -> &BufReader<T> {
-        &self.inner
-    }
-}
+impl<T> Stream for BuffedStream<T>
+where
+    T: AsyncRead + Unpin,
+{
+    type Item = std::io::Result<ProtocolMessage>;
 
-impl<T> AsMut<BufReader<T>> for BuffedStream<T> {
-    fn as_mut(&mut self) -> &mut BufReader<T> {
-        &mut self.inner
-    }
-}
-
-impl<T> From<BufReader<T>> for BuffedStream<T> {
-    fn from(buf: BufReader<T>) -> Self {
-        Self {
-            inner: buf,
-            shared_secret: None,
-            decryption_stream: None,
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match take_pinned_inner!(self).poll_next(cx) {
+            Poll::Ready(Some(Ok(message))) => Poll::Ready(Some(Ok(message))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Error on bincode reading during pump: {}", e))))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl<T> Sink<ProtocolMessage> for BuffedStream<T>
+where
+    T: AsyncWrite + Unpin,
+{
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        take_pinned_inner!(self)
+            .poll_ready(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: ProtocolMessage) -> Result<(), Self::Error> {
+        take_pinned_inner!(self)
+            .start_send(item)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write encrypted packet: {}", e)))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        futures::Sink::<ProtocolMessage>::poll_flush(take_pinned_inner!(self), cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        take_pinned_inner!(self)
+            .poll_close(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to shutdown inner stream: {}", e)))
     }
 }
 
@@ -116,108 +145,66 @@ where
     T: AsyncRead + Unpin,
 {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        // In the unencrypted case, we can just read the data from the `BufReader`,
-        // and let it handle its internal structure.
+        // Read directly from the inner stream if there is no shared secret.
+        // This is the case where we are not encrypting the stream.
         if self.shared_secret.is_none() {
-            return take_pinned_inner!(self).poll_read(cx, buf);
+            return Pin::new(self.inner.get_mut()).poll_read(cx, buf);
         }
 
-        // In the encrypted case, attempt to read the data from self as a `BufReader`, and advance the
-        // `decryption_stream` if data was read.
-
-        let rem = ready!(self.as_mut().poll_fill_buf(cx)?);
-
-        let amt = std::cmp::min(rem.len(), buf.remaining());
-        buf.put_slice(&rem[..amt]);
-        self.consume(amt);
-
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl<T> AsyncBufRead for BuffedStream<T>
-where
-    T: AsyncRead + Unpin,
-{
-    fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
-        // In the unencrypted case, we can just read the data from the `BufReader`,
-        // and let it handle its internal structure.
-        if self.shared_secret.is_none() {
-            return take_pinned_inner!(self).poll_fill_buf(cx);
-        }
-
-        // In the encrypted case, we need to decrypt the data, so use the
-        // `poll_fill_buf` method to get the data through the `BufReader`'s
-        // internal logic, and then decrypt it.
+        // Perform the decryption logic.
 
         let key = &self.shared_secret.unwrap();
-        let result = pinned_inner!(self).poll_fill_buf(cx)?;
 
-        // In the case where we got more data, we need to decrypt it.
-        if let Poll::Ready(data) = result {
-            // If we read no data from the inner buffer, then we are "shutdown",
-            // so we should shutdown the write side of the `decryption_stream`, and
-            // return the final poll result.
-            if data.is_empty() {
-                ready!(pinned_decryption_stream!(self).poll_shutdown(cx)?);
+        // Use the bincode reader to get the next packet.
+        // TODO: We could actually loop on poll next here until we either get a pending, or we no longer have space in the
+        // read stream.
+        let result = pinned_inner!(self).poll_next(cx);
 
-                return take_pinned_decryption_stream!(self).poll_fill_buf(cx);
+        match result {
+            Poll::Ready(Some(Ok(message))) => {
+                let ProtocolMessage::EncryptedPacket { nonce, data } = message else {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid message type when decrypting")));
+                };
+
+                let Ok(decrypted_data) = decrypt(key, &data, &nonce) else {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed")));
+                };
+
+                // We have the decrypted data, so we can write it to the `read_stream`.
+                let written = ready!(pinned_read_stream!(self).poll_write(cx, &decrypted_data)?);
+
+                // Fail if the interim buffer is too small.
+                if written < decrypted_data.len() {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
+                    )));
+                }
+
+                ready!(pinned_read_stream!(self).poll_flush(cx)?);
             }
+            Poll::Ready(Some(Err(e))) => {
+                // This is the case where we have a bincode error, so we should
+                // return the error.
 
-            // If there is no delimiter, we don't have enough data to decrypt, so fallback to
-            // polling the decryption stream, but do not advance the inner `BufReader` stream.
-
-            let delimiter_index = find_next_delimiter(data);
-            let Some(delimiter_index) = delimiter_index else {
-                return take_pinned_decryption_stream!(self).poll_fill_buf(cx);
-            };
-
-            // We have the encrypted data, so we can decrypt it.
-
-            let encrypted_packet = &data[..delimiter_index];
-            let Ok(nonce) = encrypted_packet[..Constant::SHARED_SECRET_NONCE_SIZE].try_into() else {
-                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid nonce size when decrypting")));
-            };
-            let encrypted_data = &encrypted_packet[Constant::SHARED_SECRET_NONCE_SIZE..];
-
-            let Ok(decrypted_data) = decrypt(key, encrypted_data, &nonce) else {
-                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed")));
-            };
-
-            // We have the decrypted data, so we can write it to the `decryption_stream`.
-            let written = ready!(pinned_decryption_stream!(self).poll_write(cx, &decrypted_data)?);
-
-            // Fail if the interim buffer is too small.
-            if written < decrypted_data.len() {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
-                )));
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Error on bincode reading during pump: {}", e))));
             }
+            Poll::Ready(None) => {
+                // If we read no data from the inner buffer, then we are "shutdown",
+                // so we should shutdown the write side of the `decryption_stream`, and
+                // return the final poll result (bottom of function).
 
-            ready!(pinned_decryption_stream!(self).poll_flush(cx)?);
-
-            // Since the data has successfully been written to the `decryption_stream`, we can consume it from the `inner` stream.
-            pinned_inner!(self).consume(delimiter_index + Constant::DELIMITER_SIZE);
+                ready!(pinned_read_stream!(self).poll_shutdown(cx)?);
+            }
+            Poll::Pending => {
+                // If we are pending, then we should pass through to the underlying decryption stream (so do nothing here).
+                // The underlying decryption stream will be properly shutdown in the case of a shutdown on the inner stream.
+            }
         }
 
         // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the
         // decrypted stream, so we just offload onto its `poll_fill_buf` method.;
-        take_pinned_decryption_stream!(self).poll_fill_buf(cx)
-    }
-
-    fn consume(mut self: Pin<&mut Self>, amt: usize) {
-        // In the unencrypted case, we can just consume the data from the `BufReader`,
-        // and let it handle its internal structure.
-        if self.shared_secret.is_none() {
-            pinned_inner!(self).consume(amt);
-            return;
-        }
-
-        // In the encrypted case, we only consume from the `decryption_stream`, since the
-        // `inner` stream is consumed in the `poll_fill_buf` method.
-
-        pinned_decryption_stream!(self).consume(amt)
+        take_pinned_read_stream!(self).poll_read(cx, buf)
     }
 }
 
@@ -226,14 +213,11 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-        // In the unencrypted case, we can just write the data to the `BufReader`,
-        // and let it handle its internal structure.
         if self.shared_secret.is_none() {
-            return pinned_inner!(self).poll_write(cx, buf);
+            return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
         }
 
-        // In the encrypted case, we need to encrypt the data, so use the
-        // `poll_write` method to write to the underlying stream.
+        let key = self.shared_secret.as_ref().unwrap();
 
         // First, we need to pare down the data to the maximum size of the encrypted data, if needed.
         let max_size = Constant::BUFFER_SIZE - Constant::ENCRYPTION_OVERHEAD;
@@ -241,33 +225,32 @@ where
         let buf = &buf[..amt];
 
         // Get the actual encrypted data.
-        let key = &self.shared_secret.unwrap();
         let encrypted_data = encrypt(key, buf).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Encryption failed"))?;
 
-        // Create the encrypted packet.
-        let encrypted_packet = [encrypted_data.nonce.as_ref(), &encrypted_data.data, Constant::DELIMITER].concat();
+        let message = ProtocolMessage::EncryptedPacket {
+            nonce: encrypted_data.nonce,
+            data: encrypted_data.data,
+        };
 
-        // Write the encrypted data to the inner `BufReader`.
-        let written = ready!(pinned_inner!(self).poll_write(cx, &encrypted_packet)?);
-
-        // Check to make sure that the full write succeeded.
-        if written < encrypted_packet.len() {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Encrypted packet buffer overflow (on the inner stream): the author of this utility should add a flag to allow you to increase it",
-            )));
-        }
+        // Write the encrypted data.
+        pinned_inner!(self)
+            .start_send(message)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to write encrypted packet"))?;
 
         // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
         Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        pinned_inner!(self).poll_flush(cx)
+        pinned_inner!(self)
+            .poll_flush(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        pinned_inner!(self).poll_shutdown(cx)
+        pinned_inner!(self)
+            .poll_close(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to shutdown inner stream: {}", e)))
     }
 }
 
@@ -283,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unencrypted_buffed_stream() {
-        let (client, mut server) = tokio::io::duplex(1024);
+        let (client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
 
         let mut client_stream = BuffedStream::new(client);
 
@@ -302,7 +285,7 @@ mod tests {
     async fn test_encrypted_buffed_stream() {
         let shared_secret = generate_test_shared_secret();
 
-        let (client, mut server) = tokio::io::duplex(1024);
+        let (client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
 
         let data = b"Hello, world!";
@@ -313,14 +296,14 @@ mod tests {
         let mut received = Vec::new();
         server.read_to_end(&mut received).await.unwrap();
 
-        assert_eq!(received.len(), 49);
+        assert_eq!(received.len(), 47);
     }
 
     #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream() {
         let shared_secret = generate_test_shared_secret();
 
-        let (client, server) = tokio::io::duplex(1024);
+        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
         let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
 
@@ -339,7 +322,7 @@ mod tests {
     async fn test_e2e_encrypted_buffed_stream_with_multiple_packets() {
         let shared_secret = generate_test_shared_secret();
 
-        let (client, server) = tokio::io::duplex(1024);
+        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
         let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
         let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
 

@@ -17,7 +17,9 @@ tracing = { version = "0.1.41", features = ["log"] }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "ansi"] }
 ring = { version = "0.17.11", features = ["std"]}
 base64 = { version = "0.22.1" }
-futures ={ version = "0.3.31" }
+futures = { version = "0.3.31" }
+async-bincode = { version = "0.7.3" }
+serde = { version = "1.0.218", features = ["derive"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

@@ -1,4 +1,5 @@
 #![feature(coverage_attribute)]
+#![feature(const_type_name)]
 
 use anyhow::Context;
 use base::{Err, Void};
@@ -8,6 +9,7 @@ use tracing::{error, info};
 pub mod base;
 pub mod buffed_stream;
 pub mod connect;
+pub mod protocol;
 pub mod serve;
 pub mod utils;
 
@@ -25,7 +27,6 @@ async fn main() {
         .with_target(false)
         .with_thread_ids(false)
         .with_thread_names(false)
-        .with_thread_names(false)
         .with_max_level(level)
         .init();
 
@@ -39,7 +40,7 @@ async fn main() {
 
 async fn execute_command(command: Option<Command>) -> Void {
     match command {
-        Some(Command::Serve { bind, key, remote_regex, encrypt }) => {
+        Some(Command::Serve { bind, key, remote_regex }) => {
             let pair = match key {
                 Some(key) => utils::generate_key_pair_from_key(&key),
                 None => utils::generate_key_pair(),
@@ -50,7 +51,7 @@ async fn execute_command(command: Option<Command>) -> Void {
 
             info!("🚀 Starting server on `{}` ...", bind);
 
-            serve::Instance::prepare(pair.public_key, remote_regex, bind, encrypt)?.start().await?;
+            serve::Instance::prepare(pair.public_key, remote_regex, bind)?.start().await?;
         }
         Some(Command::Connect { server, tunnel, key, encrypt }) => {
             connect::Instance::prepare(key, server, &tunnel, encrypt)?.start().await?;
@@ -110,12 +111,6 @@ enum Command {
         /// The regex is matched against the entire hostname, so `^` and `$` are not needed.
         #[arg(short, long, default_value = ".*")]
         remote_regex: String,
-
-        /// Specifies whether to encrypt the traffic between the client and server.
-        ///
-        /// Both the client and server must specify this flag for it to take effect properly.
-        #[arg(short, long, default_value_t = false)]
-        encrypt: bool,
     },
 
     /// Connects to a server and forwards traffic from a local port to a remote `host:port`
@@ -197,7 +192,7 @@ mod tests {
         tokio::spawn(EchoServer::start(remote_address));
 
         // Start a "server".
-        tokio::spawn(serve::Instance::prepare(public_key, remote_regex, server_address.clone(), should_encrypt).unwrap().start());
+        tokio::spawn(serve::Instance::prepare(public_key, remote_regex, server_address.clone()).unwrap().start());
 
         // Start a "client".
         tokio::spawn(connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
@@ -211,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_args() {
-        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key", "key", "--remote-regex", ".*", "-e"]);
+        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key", "key", "--remote-regex", ".*"]);
 
         assert_eq!(
             args.command,
@@ -219,11 +214,10 @@ mod tests {
                 bind: "127.0.0.1:3000".to_string(),
                 key: Some("key".to_string()),
                 remote_regex: ".*".to_string(),
-                encrypt: true
             })
         );
 
-        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key", "key"]);
+        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key", "key", "-e"]);
 
         assert_eq!(
             args.command,
@@ -231,7 +225,7 @@ mod tests {
                 server: "127.0.0.1:3000".to_string(),
                 tunnel: vec!["3000:127.0.0.1:3000".to_string(), "4000".to_string()],
                 key: "key".to_string(),
-                encrypt: false
+                encrypt: true
             })
         );
     }

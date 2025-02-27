@@ -5,6 +5,8 @@ use ring::{
     hkdf::{self, HKDF_SHA256},
 };
 
+use crate::protocol::{Challenge, PeerPublicKey, Preamble};
+
 pub type Err = anyhow::Error;
 pub type Res<T> = anyhow::Result<T, Err>;
 pub type Void = Res<()>;
@@ -20,14 +22,9 @@ impl Constant {
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
     pub const DELIMITER_SIZE: usize = 8;
     pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
-    pub const ERROR_INVALID_HOST: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCB";
-    pub const ERROR_INVALID_KEY: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xCA";
-    pub const HANDSHAKE_CHALLENGE: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBD";
-    pub const HANDSHAKE_CHALLENGE_RESPONSE: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBE";
-    pub const HANDSHAKE_COMPLETION: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBF";
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
+    pub const NULL_PEER_PUBLIC_KEY: PeerPublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
     pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
-    pub const PREAMBLE_INIT: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBC";
     pub const PRIVATE_KEY_SIZE: usize = 83;
     pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
     pub const SHARED_SECRET_SIZE: usize = 32;
@@ -41,21 +38,6 @@ pub type SharedSecret = [u8; Constant::SHARED_SECRET_SIZE];
 
 /// A helper type for a shared secret nonce.
 pub type SharedSecretNonce = [u8; Constant::SHARED_SECRET_NONCE_SIZE];
-
-/// A helper type for a challenge.
-pub type Challenge = [u8; Constant::CHALLENGE_SIZE];
-
-/// A helper type for a signature.
-pub type Signature = [u8; Constant::SIGNATURE_SIZE];
-
-/// A helper type for an ephemeral public key.
-pub type PeerPublicKey = [u8; Constant::PEER_PUBLIC_KEY_SIZE];
-
-/// Serves as the preamble for the connection.
-pub struct Preamble {
-    pub remote: String,
-    pub peer_public_key: PeerPublicKey,
-}
 
 /// The bind address and host address for the client.
 pub struct TunnelDefinition {

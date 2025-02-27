@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Context;
 use base64::Engine;
 use rand::{Rng, distr::Alphanumeric};
@@ -10,10 +8,13 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
     signature::{Ed25519KeyPair, KeyPair},
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
-use crate::base::{Base64KeyPair, Challenge, Constant, EncryptedData, EphemeralKeyPair, Err, PeerPublicKey, Preamble, Res, SharedSecret, SharedSecretNonce, Signature, TunnelDefinition, Void};
+use crate::{
+    base::{Base64KeyPair, Constant, EncryptedData, EphemeralKeyPair, Err, Res, SharedSecret, SharedSecretNonce, TunnelDefinition, Void},
+    protocol::{Challenge, PeerPublicKey, Signature},
+};
 
 pub fn random_string(len: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
@@ -128,7 +129,7 @@ pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &SharedSecretN
     Ok(plaintext.to_vec())
 }
 
-pub fn validate_signed_challenge(challenge: &[u8], signature: &[u8], public_key: &str) -> Void {
+pub fn validate_signed_challenge(challenge: &Challenge, signature: &Signature, public_key: &str) -> Void {
     let public_key = Constant::BASE64_ENGINE.decode(public_key).context("Could not decode public key")?;
 
     let unparsed_public_key = ring::signature::UnparsedPublicKey::new(Constant::SIGNATURE, public_key);
@@ -195,74 +196,6 @@ where
     tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
 }
 
-pub fn prepare_preamble(remote: &str, peer_public_key: &PeerPublicKey) -> Res<Vec<u8>> {
-    let remote_bytes = remote.as_bytes();
-
-    let preamble = [Constant::PREAMBLE_INIT, remote_bytes, Constant::DELIMITER, peer_public_key, Constant::DELIMITER].concat();
-
-    Ok(preamble)
-}
-
-pub async fn process_preamble<T>(stream: &mut T) -> Res<Preamble>
-where
-    T: AsyncBufRead + Unpin,
-{
-    let data = read_to_next_delimiter(stream).await?;
-
-    let (init, remote_bytes) = data.split_at(Constant::DELIMITER_SIZE);
-
-    if init != Constant::PREAMBLE_INIT {
-        return Err(Err::msg("Invalid preamble"));
-    }
-
-    let remote = String::from_utf8(remote_bytes.to_vec()).context("Invalid UTF-8 in preamble")?;
-
-    let peer_public_key = read_to_next_delimiter(stream).await?.try_into().map_err(|_| Err::msg("Invalid ephemeral public key length"))?;
-
-    Ok(Preamble { remote, peer_public_key })
-}
-
-pub fn find_next_delimiter(data: &[u8]) -> Option<usize> {
-    data.windows(Constant::DELIMITER_SIZE).position(|window| window == Constant::DELIMITER)
-}
-
-pub async fn read_to_next_delimiter<T>(stream: &mut T) -> Res<Vec<u8>>
-where
-    T: AsyncBufRead + Unpin,
-{
-    let mut buffer = Vec::with_capacity(Constant::BUFFER_SIZE);
-    let mut delimiter_index = usize::MAX;
-
-    for _ in 0..100 {
-        let inner_buffer = stream.fill_buf().await?;
-
-        // Find next delimiter.
-
-        for (k, window) in inner_buffer.windows(Constant::DELIMITER_SIZE).enumerate() {
-            if window == Constant::DELIMITER {
-                delimiter_index = k;
-                break;
-            }
-        }
-
-        if delimiter_index != usize::MAX {
-            buffer.extend_from_slice(&inner_buffer[..delimiter_index]);
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    if delimiter_index == usize::MAX {
-        return Err(Err::msg("Unable to read to next delimiter from stream after 100 100-millisecond reads (about 10 seconds)."));
-    }
-
-    // Consume the data.
-    stream.consume(delimiter_index + Constant::DELIMITER_SIZE);
-
-    Ok(buffer)
-}
-
 pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
@@ -285,7 +218,7 @@ pub mod tests {
     };
     use tokio::io::AsyncWriteExt;
 
-    use crate::buffed_stream::BuffedStream;
+    use crate::{buffed_stream::BuffedStream, protocol::Preamble};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -293,37 +226,6 @@ pub mod tests {
         io::{AsyncWrite, ReadBuf},
         net::TcpListener,
     };
-
-    pub struct MockStream {
-        pub read: Vec<u8>,
-        pub write: Vec<u8>,
-    }
-
-    impl MockStream {
-        pub fn new(read: Vec<u8>, write: Vec<u8>) -> Self {
-            Self { read, write }
-        }
-    }
-
-    impl AsyncRead for MockStream {
-        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().read.as_slice()).poll_read(cx, buf)
-        }
-    }
-
-    impl AsyncWrite for MockStream {
-        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-            Pin::new(&mut self.get_mut().write).poll_write(cx, buf)
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().write).poll_flush(cx)
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().write).poll_shutdown(cx)
-        }
-    }
 
     pub struct EchoServer;
 
@@ -438,30 +340,6 @@ pub mod tests {
         assert!(parse_tunnel_definition(input).is_err());
     }
 
-    #[test]
-    fn test_prepare_preamble() {
-        let remote = "test_remote";
-        let peer_public_key = &generate_test_fake_peer_public_key();
-
-        let preamble = prepare_preamble(remote, peer_public_key).unwrap();
-
-        assert_eq!(preamble.len(), remote.len() + peer_public_key.len() + 3 * Constant::DELIMITER_SIZE);
-    }
-
-    #[tokio::test]
-    async fn test_process_preamble() {
-        let remote = "test_remote";
-        let peer_public_key = &generate_test_fake_peer_public_key();
-
-        let client_to_server = prepare_preamble(remote, peer_public_key).unwrap();
-
-        let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
-
-        let preamble = process_preamble(&mut stream).await.unwrap();
-
-        assert_eq!(preamble.remote, remote);
-    }
-
     #[tokio::test]
     async fn test_handle_pump() {
         let (mut client, mut server1) = tokio::io::duplex(1024);
@@ -476,16 +354,5 @@ pub mod tests {
 
         assert_eq!(up, 14);
         assert_eq!(down, 15);
-    }
-
-    #[tokio::test]
-    async fn test_read_to_next_delimiter() {
-        let message = b"Hello, world!";
-        let data = [message, Constant::DELIMITER].concat();
-        let mut stream = BuffedStream::new(MockStream::new(data, vec![]));
-
-        let result = read_to_next_delimiter(&mut stream).await.unwrap();
-
-        assert_eq!(result, message);
     }
 }
