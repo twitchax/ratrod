@@ -286,6 +286,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use futures::future::join_all;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption};
@@ -357,9 +358,6 @@ mod tests {
             assert_eq!(data.len(), received.len());
         });
 
-        tokio::select! {
-            write_result = write_task => write_result.unwrap(),
-            read_result = read_task => read_result.unwrap(),
-        };
+        join_all([write_task, read_task]).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
     }
 }

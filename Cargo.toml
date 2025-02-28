@@ -7,6 +7,14 @@ description = "A TCP tunneler that uses public / private key authentication with
 license = "MIT"
 repository = "https://github.com/twitchax/ratrod"
 
+[lib]
+name = "ratrodlib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ratrod"
+path = "src/bin.rs"
+
 [dependencies]
 tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 clap = { version = "4.5.31", features = ["derive"] }
@@ -24,3 +32,8 @@ homedir = { version = "0.3.4" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false

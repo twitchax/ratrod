@@ -221,24 +221,6 @@ pub mod tests {
 
     use super::*;
     use pretty_assertions::assert_eq;
-    use tokio::net::TcpListener;
-
-    pub struct EchoServer;
-
-    impl EchoServer {
-        pub async fn start(bind_address: String) -> Void {
-            let listener = TcpListener::bind(bind_address).await?;
-
-            loop {
-                let (client, _) = listener.accept().await?;
-                tokio::spawn(async move {
-                    let (mut read, mut write) = client.into_split();
-
-                    let _ = tokio::io::copy(&mut read, &mut write).await;
-                });
-            }
-        }
-    }
 
     pub fn generate_test_duplex() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
         let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);

@@ -6,18 +6,12 @@
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
 
-use base::{Err, Void};
+use ratrodlib::base::{Err, Void};
 use clap::{Parser, Subcommand};
-use keypair::{generate, resolve_private_key, resolve_public_key};
+use ratrodlib::keypair::{generate, resolve_private_key, resolve_public_key};
 use tracing::error;
 
-pub mod base;
-pub mod buffed_stream;
-pub mod connect;
-pub mod keypair;
-pub mod protocol;
-pub mod serve;
-pub mod utils;
+
 
 #[coverage(off)]
 #[tokio::main]
@@ -48,11 +42,11 @@ async fn execute_command(command: Option<Command>) -> Void {
     match command {
         Some(Command::Serve { bind, key, remote_regex }) => {
             let public_key = resolve_public_key(key)?;
-            serve::Instance::prepare(public_key, remote_regex, bind)?.start().await?;
+            ratrodlib::serve::Instance::prepare(public_key, remote_regex, bind)?.start().await?;
         }
         Some(Command::Connect { server, tunnel, key, encrypt }) => {
             let private_key = resolve_private_key(key)?;
-            connect::Instance::prepare(private_key, server, &tunnel, encrypt)?.start().await?;
+            ratrodlib::connect::Instance::prepare(private_key, server, &tunnel, encrypt)?.start().await?;
         }
         Some(Command::GenerateKeypair { print, location, filename }) => {
             generate(print, location, filename)?;
@@ -181,17 +175,34 @@ enum Command {
 mod tests {
     use std::time::Duration;
 
-    use crate::{
+    use ratrodlib::{
         base::Base64KeyPair,
-        utils::{generate_key_pair, tests::EchoServer},
+        utils::generate_key_pair,
     };
 
     use super::*;
     use pretty_assertions::assert_eq;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpStream,
+        net::{TcpListener, TcpStream},
     };
+
+    pub struct EchoServer;
+
+    impl EchoServer {
+        pub async fn start(bind_address: String) -> Void {
+            let listener = TcpListener::bind(bind_address).await?;
+
+            loop {
+                let (client, _) = listener.accept().await?;
+                tokio::spawn(async move {
+                    let (mut read, mut write) = client.into_split();
+
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        }
+    }
 
     async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> [String; 2] {
         let remote_address = format!("127.0.0.1:{}", port);
@@ -203,10 +214,10 @@ mod tests {
         tokio::spawn(EchoServer::start(remote_address));
 
         // Start a "server".
-        tokio::spawn(serve::Instance::prepare(public_key, remote_regex, server_address.clone()).unwrap().start());
+        tokio::spawn(ratrodlib::serve::Instance::prepare(public_key, remote_regex, server_address.clone()).unwrap().start());
 
         // Start a "client".
-        tokio::spawn(connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
+        tokio::spawn(ratrodlib::connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
 
         // Do a "healthcheck" to ensure that the server is up and running.
 
