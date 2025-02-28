@@ -1,18 +1,23 @@
 //! Keypair generation and resolution.
-//! 
+//!
 //! This module provides functions to generate a keypair, resolve private and public keys from files or strings, and handle errors related to key resolution.
 
 use anyhow::Context;
 use base64::Engine;
 use tracing::info;
 
-use crate::{base::{Constant, Err, Res, Void}, utils};
+use crate::{
+    base::{Constant, Err, Res, Void},
+    utils,
+};
 
 /// Gets the user's home directory.
 pub fn get_home() -> Res<String> {
-    let home = homedir::my_home().context("Failed to get home directory.")?.ok_or_else(|| {
-        Err::msg("Failed to get home directory.")
-    })?.to_string_lossy().to_string();
+    let home = homedir::my_home()
+        .context("Failed to get home directory.")?
+        .ok_or_else(|| Err::msg("Failed to get home directory."))?
+        .to_string_lossy()
+        .to_string();
 
     Ok(home)
 }
@@ -26,14 +31,10 @@ pub fn generate(print: bool, location: Option<String>, filename: Option<String>)
         info!("📢 Public key: `{}`", pair.public_key);
         info!("🔑 Private key: `{}`", pair.private_key);
     }
-    
-    let location = location.unwrap_or_else(|| {
-        format!("{}/.ratrod", home)
-    });
 
-    let filename = filename.unwrap_or_else(|| {
-        "key".to_string()
-    });
+    let location = location.unwrap_or_else(|| format!("{}/.ratrod", home));
+
+    let filename = filename.unwrap_or_else(|| "key".to_string());
 
     let path = format!("{}/{}", location, filename);
 
@@ -47,16 +48,14 @@ pub fn generate(print: bool, location: Option<String>, filename: Option<String>)
 }
 
 /// Resolves the private key from a file or string.
-pub fn resolve_private_key(
-    key: Option<String>,
-) -> Res<String> {
+pub fn resolve_private_key(key: Option<String>) -> Res<String> {
     let path = match key {
         Some(key) => {
             // First, see if the user provided as a command line argument.
             if Constant::BASE64_ENGINE.decode(&key).is_ok() {
                 return Ok(key);
             }
-            
+
             // The key is likely a file path.
             key
         }
@@ -71,16 +70,14 @@ pub fn resolve_private_key(
 }
 
 /// Resolves the public key from a file or string.
-pub fn resolve_public_key(
-    key: Option<String>,
-) -> Res<String> {
+pub fn resolve_public_key(key: Option<String>) -> Res<String> {
     let path = match key {
         Some(key) => {
             // First, see if the user provided as a command line argument.
             if Constant::BASE64_ENGINE.decode(&key).is_ok() {
                 return Ok(key);
             }
-            
+
             // The key is likely a file path.
             key
         }
@@ -105,7 +102,7 @@ mod tests {
 
         let private_key = resolve_private_key(Some("./target/test/fake_key".to_string())).unwrap();
         let public_key = resolve_public_key(Some("./target/test/fake_key.pub".to_string())).unwrap();
-        
+
         let challenge = generate_challenge();
         let signature = sign_challenge(&challenge, &private_key).unwrap();
 

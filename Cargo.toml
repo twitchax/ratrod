@@ -3,7 +3,7 @@ name = "ratrod"
 version = "0.3.2"
 edition = "2024"
 authors = ["Aaron Roney <twitchax@gmail.com>"]
-description = "Tunnels a local port to a remote server, which then redirects traffic to a specified remote host."
+description = "A TCP tunneler that uses public / private key authentication with encryption."
 license = "MIT"
 repository = "https://github.com/twitchax/ratrod"
 

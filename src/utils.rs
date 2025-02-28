@@ -1,5 +1,5 @@
 //! Utility functions for the application.
-//! 
+//!
 //! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
 //! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
 
@@ -208,7 +208,7 @@ where
 {
     let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
-    info!("➡️ {} bytes ⬅️ {} bytes", result.0, result.1);
+    info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
 
     Ok(result)
 }

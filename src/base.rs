@@ -1,5 +1,5 @@
 //! This module contains constants and types used throughout the code.
-//! 
+//!
 //! It includes constants for cryptographic algorithms, buffer sizes, and other parameters.
 
 use base64::{engine::GeneralPurpose, prelude::BASE64_URL_SAFE_NO_PAD};
@@ -42,20 +42,20 @@ impl Constant {
 }
 
 /// A helper type for a shared secret.
-/// 
+///
 /// These are the secrets that each end of the connection will use to encrypt and decrypt data.
 /// They are derived from the ephemeral keys, and DH key exchange.
 pub type SharedSecret = [u8; Constant::SHARED_SECRET_SIZE];
 
 /// A helper type for a shared secret nonce.
-/// 
+///
 /// These are the nonces that each end of the connection will use to encrypt and decrypt data.
 /// They are generated randomly, and are used to ensure that the same data encrypted multiple times will
 /// produce different ciphertexts.
 pub type SharedSecretNonce = [u8; Constant::SHARED_SECRET_NONCE_SIZE];
 
 /// The bind address and host address for the client.
-/// 
+///
 /// This is used to determine where to bind the socket, and where to connect to on the server side.
 /// Essentially, this is the tunnel.
 #[derive(Clone, Debug)]
@@ -65,7 +65,7 @@ pub struct TunnelDefinition {
 }
 
 /// A public-private key pair.
-/// 
+///
 /// This is used to sign and verify data, primarily during the handshake phase.
 #[derive(Clone, Debug)]
 pub struct Base64KeyPair {
@@ -74,7 +74,7 @@ pub struct Base64KeyPair {
 }
 
 /// A public-private key pair for ephemeral key exchange.
-/// 
+///
 /// This is used to derive a shared secret, which is used to encrypt and decrypt data.
 /// This is used during the handshake phase.
 pub struct EphemeralKeyPair {
@@ -83,7 +83,7 @@ pub struct EphemeralKeyPair {
 }
 
 /// A wrapper for a local ephemeral key pair, and a peer public key.
-/// 
+///
 /// This is used to derive a shared secret, which is used to encrypt and decrypt data.
 /// Essentially, it holds the instances _local_ public/private key pair, and the _remote_ peer public key.
 /// The _local_ private key, couples with the _peer_ public key and challenge is used to derive the shared secret.
@@ -94,7 +94,7 @@ pub struct ClientKeyExchangeData {
 }
 
 /// A wrapper for the Preamble, and the EphemeralKeyPair.
-/// 
+///
 /// This is mostly used as a convenience type, to hold the preamble and the ephemeral key pair together.
 pub struct ServerHandshakeData {
     pub preamble: Preamble,
@@ -102,7 +102,7 @@ pub struct ServerHandshakeData {
 }
 
 /// A wrapper for the Challenge, and the PeerPublicKey.
-/// 
+///
 /// This is mostly used as a convenience type, to hold the challenge and the peer public key together.
 pub struct ClientHandshakeData {
     pub challenge: Challenge,
@@ -110,7 +110,7 @@ pub struct ClientHandshakeData {
 }
 
 /// A wrapper for encrypted data, and its nonce.
-/// 
+///
 /// This is used to encrypt and decrypt data, using the shared secret.
 /// The nonce is used to ensure that the same data encrypted multiple times will produce different ciphertexts.
 /// The data and nonce, together, are required to decrypt the data.

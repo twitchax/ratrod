@@ -8,7 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{EphemeralKeyPair, ServerHandshakeData, Res, Void},
+    base::{EphemeralKeyPair, Res, ServerHandshakeData, Void},
     buffed_stream::BuffedStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, Preamble, ProtocolError, ProtocolMessage},
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, validate_signed_challenge},
@@ -22,7 +22,7 @@ pub struct ConfigState;
 pub struct ReadyState;
 
 /// The server instance.
-/// 
+///
 /// This is the main entry point for the server. It is used to prepare the server, and start it.
 pub struct Instance<S = ConfigState> {
     config: Config,
@@ -59,7 +59,7 @@ impl Instance<ReadyState> {
 // Operations.
 
 /// Verifies the preamble from the client.
-/// 
+///
 /// This is used to ensure that the client is allowed to connect to the specified remote.
 async fn verify_preamble<T>(stream: &mut T, preamble: &Preamble, remote_regex: &Regex) -> Void
 where
@@ -75,7 +75,7 @@ where
 }
 
 /// Handles the key challenge from the client.
-/// 
+///
 /// This is used to ensure that the client is allowed to connect to the server.
 /// It also verifies the signature of the challenge from the client, authenticating the client.
 async fn handle_and_validate_key_challenge<T>(stream: &mut T, public_key: &str, challenge: &Challenge) -> Void
@@ -104,7 +104,7 @@ where
 }
 
 /// Completes the handshake.
-/// 
+///
 /// This is used to send the server's ephemeral public key to the client
 /// for the key exchange.
 async fn complete_handshake<T>(stream: &mut T) -> Res<EphemeralKeyPair>
@@ -124,7 +124,7 @@ where
 }
 
 /// Handles the e2e handshake.
-/// 
+///
 /// This is used to handle the handshake between the client and server.
 /// It verifies the preamble, handles the key challenge, and completes the handshake.
 async fn handle_handshake<T>(stream: &mut T, public_key: &str, remote_regex: &Regex, challenge: &Challenge) -> Res<ServerHandshakeData>
@@ -146,7 +146,7 @@ where
 }
 
 /// Runs the TCP server.
-/// 
+///
 /// This is the main entry point for the server. It binds to the specified address, and handles incoming connections.
 async fn run_tcp_server(config: Config) -> Void {
     let listener = TcpListener::bind(&config.bind_address).await?;
@@ -159,7 +159,7 @@ async fn run_tcp_server(config: Config) -> Void {
 }
 
 /// Handles the TCP connection.
-/// 
+///
 /// This is used to handle the TCP connection between the client and server.
 /// It handles the handshake, and pumps data between the client and server.
 async fn handle_tcp(client: TcpStream, config: Config) {
@@ -229,7 +229,7 @@ async fn handle_tcp(client: TcpStream, config: Config) {
 // Config.
 
 /// The server configuration.
-/// 
+///
 /// This is used to store the server's configuration.
 #[derive(Clone)]
 struct Config {
@@ -278,10 +278,7 @@ mod tests {
         let remote = "test_remote";
         let challenge = generate_challenge();
 
-        let preamble = Preamble {
-            remote: remote.into(),
-            peer_public_key,
-        };
+        let preamble = Preamble { remote: remote.into(), peer_public_key };
 
         // First, send everything from the client to the server.
         let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());
@@ -306,10 +303,7 @@ mod tests {
         let challenge = generate_challenge();
         let bad_key = generate_key_pair().unwrap().private_key;
 
-        let preamble = Preamble {
-            remote: remote.into(),
-            peer_public_key,
-        };
+        let preamble = Preamble { remote: remote.into(), peer_public_key };
 
         let bad_signature = sign_challenge(&challenge, &bad_key).unwrap();
 
@@ -336,10 +330,7 @@ mod tests {
         let remote = "doesn't match";
         let challenge = generate_challenge();
 
-        let preamble = Preamble {
-            remote: remote.into(),
-            peer_public_key,
-        };
+        let preamble = Preamble { remote: remote.into(), peer_public_key };
 
         // First, send everything from the client to the server.
         let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());

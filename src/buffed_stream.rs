@@ -1,8 +1,8 @@
 //! Buffed stream module.
-//! 
+//!
 //! This module contains the `BuffedStream` type, which is a wrapper around a stream that provides
 //! buffering and encryption/decryption functionality.
-//! 
+//!
 //! It is used to provide a bincode-centric stream that can be used to send and receive data
 //! in a more efficient manner.  In addition, the `AsyncRead` and `AsyncWrite` implementations
 //! are designed to "transparently" handle encryption and decryption of the data being sent
@@ -57,11 +57,11 @@ macro_rules! take_pinned_read_stream {
 // Types.
 
 /// BuffedStream type.
-/// 
+///
 /// This type is a wrapper around a stream that provides buffering and encryption/decryption functionality.
 /// It is used to provide a bincode-centric stream that can be used to send and receive data
 /// in a more efficient manner.
-/// 
+///
 /// The `shared_secret` field is used to encrypt and decrypt data.
 /// The `read_stream` field is used to buffer data that has been decrypted.
 pub struct BuffedStream<T> {

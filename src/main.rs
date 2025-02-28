@@ -1,6 +1,6 @@
 //! Ratrod
-//! 
-//! A (likely semi-inefficient) TCP tunneler that uses public/private key authentication with encryption.
+//!
+//! A TCP tunneler that uses public / private key authentication with encryption.
 //! Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
 
 #![feature(coverage_attribute)]
@@ -14,10 +14,10 @@ use tracing::error;
 pub mod base;
 pub mod buffed_stream;
 pub mod connect;
+pub mod keypair;
 pub mod protocol;
 pub mod serve;
 pub mod utils;
-pub mod keypair;
 
 #[coverage(off)]
 #[tokio::main]
@@ -45,8 +45,6 @@ async fn main() {
 }
 
 async fn execute_command(command: Option<Command>) -> Void {
-    
-
     match command {
         Some(Command::Serve { bind, key, remote_regex }) => {
             let public_key = resolve_public_key(key)?;
@@ -70,8 +68,8 @@ async fn execute_command(command: Option<Command>) -> Void {
 /// Tunnels a local port to a remote server, which then redirects
 /// traffic to a specified remote host.
 ///
-/// A (likely semi-inefficient) TCP tunneler that uses public/private key authentication without subsequent encryption.
-/// Basically, it's `ssh -L`, but without the encryption.  This is useful for tunneling through a machine that doesn't support SSH.
+/// A TCP tunneler that uses public / private key authentication with encryption.
+/// Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {

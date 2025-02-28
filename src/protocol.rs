@@ -1,5 +1,5 @@
 //! Protocol message types and serialization.
-//! 
+//!
 //! This module contains the types and serialization methods for the protocol messages.
 
 use std::fmt::{Display, Formatter};
@@ -35,7 +35,7 @@ pub struct Preamble {
 pub trait BincodeMessage: Serialize + DeserializeOwned {}
 
 /// A helper type for protocol messages.
-/// 
+///
 /// This is the main message type for the protocol. It is used to send and receive messages over the network.
 /// It is also used to serialize and deserialize messages.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub enum ProtocolMessage {
 
 impl ProtocolMessage {
     /// Checks if the message is an error.
-    /// 
+    ///
     /// If it is, returns the message wrapped in an error.
     pub fn fail_if_error(self) -> Res<Self> {
         if let ProtocolMessage::Error(error) = self {
@@ -67,11 +67,11 @@ impl BincodeMessage for ProtocolMessage {}
 // Message error types.
 
 /// A helper type for protocol errors.
-/// 
+///
 /// This is used to send and receive errors over the network.
 /// It is also used to serialize and deserialize errors.
-/// 
-/// It should not be sent / received over the network, as it 
+///
+/// It should not be sent / received over the network, as it
 /// should be sent as a [`ProtocolMessage::Error`] message.
 /// The type system should prevent this from happening.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,7 +109,7 @@ impl ProtocolError {
 // Bincode stream impls.
 
 /// A trait for sending protocol messages over a stream.
-/// 
+///
 /// This impl is designed to ensure that the push method can only be used to send
 /// [`ProtocolMessage`] messages.
 pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpin + Sized {
@@ -118,9 +118,8 @@ pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpi
     }
 }
 
-
 /// A trait for receiving protocol messages over a stream.
-/// 
+///
 /// This impl is designed to ensure that the pull method can only be used to receive
 /// [`ProtocolMessage`] messages.
 pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + AsyncReadExt + Unpin + Sized {

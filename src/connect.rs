@@ -1,5 +1,5 @@
 //! This module contains the code for the client-side of the tunnel.
-//! 
+//!
 //! It includes the state machine, operations, and configuration.
 
 use std::marker::PhantomData;
@@ -23,7 +23,7 @@ pub struct ConfigState;
 pub struct ReadyState;
 
 /// The client instance.
-/// 
+///
 /// This is the main entry point for the client. It is used to connect, configure, and start the client.
 pub struct Instance<S = ConfigState> {
     tunnel_definitions: Vec<TunnelDefinition>,
@@ -53,7 +53,7 @@ impl Instance<ConfigState> {
 
 impl Instance<ReadyState> {
     /// Starts the client instance.
-    /// 
+    ///
     /// This is the main entry point for the client. It is used to connect, configure, and start the client
     pub async fn start(self) -> Void {
         // Finally, start the server(s) (one per tunnel definition).
@@ -81,7 +81,7 @@ impl Instance<ReadyState> {
 // Operations.
 
 /// Sends the preamble to the server.
-/// 
+///
 /// This is the first message sent to the server. It contains the remote address and the peer public key
 /// for the future key exchange.
 async fn send_preamble<T>(stream: &mut T, remote_address: &str, peer_public_key: Option<PeerPublicKey>) -> Void
@@ -101,7 +101,7 @@ where
 }
 
 /// Handles the challenge from the server.
-/// 
+///
 /// This is the second message sent to the server. It receives the challenge,
 /// signs it, and sends the signature back to the server.
 async fn handle_challenge<T>(stream: &mut T, private_key: &str) -> Res<ClientHandshakeData>
@@ -123,10 +123,7 @@ where
         return Err(Err::msg("Handshake failed: improper message type (expected handshake completion)"));
     };
 
-    Ok(ClientHandshakeData {
-        challenge,
-        peer_public_key,
-    })
+    Ok(ClientHandshakeData { challenge, peer_public_key })
 }
 
 /// Handles the handshake with the server.
@@ -150,7 +147,7 @@ where
 
     send_preamble(stream, remote_address, local_peer_public_key).await?;
     let handshake_data = handle_challenge(stream, private_key).await?;
-    
+
     // Compute the ephemeral data.
 
     let ephemeral_data = ClientKeyExchangeData {
@@ -165,7 +162,7 @@ where
 }
 
 /// Runs the TCP server.
-/// 
+///
 /// This is the main entry point for the server. It is used to accept connections and handle them.
 async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
     let result: Void = async move {
@@ -191,7 +188,7 @@ async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
 }
 
 /// Handles the TCP connection.
-/// 
+///
 /// This is the main entry point for the connection. It is used to handle the handshake and pump data between the client and server.
 async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config) {
     let id = random_string(6);
@@ -273,7 +270,7 @@ async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Con
 // Config.
 
 /// The configuration for the client.
-/// 
+///
 /// This is used to store the private key, the connect address, and whether or not to encrypt the connection.
 #[derive(Clone)]
 struct Config {
