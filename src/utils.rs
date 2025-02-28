@@ -52,7 +52,7 @@ pub fn generate_challenge() -> Challenge {
     challenge
 }
 
-pub fn sign_challenge(challenge: &[u8], private_key: &str) -> Res<Signature> {
+pub fn sign_challenge(challenge: &Challenge, private_key: &str) -> Res<Signature> {
     debug!("Challenge: `{:?}`", challenge);
 
     let private_key = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
@@ -210,22 +210,13 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use std::{
-        io,
-        pin::Pin,
-        task::{Context, Poll},
-        vec,
-    };
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-    use crate::{buffed_stream::BuffedStream, protocol::Preamble};
+    use crate::buffed_stream::BuffedStream;
 
     use super::*;
     use pretty_assertions::assert_eq;
-    use tokio::{
-        io::{AsyncWrite, ReadBuf},
-        net::TcpListener,
-    };
+    use tokio::net::TcpListener;
 
     pub struct EchoServer;
 
@@ -242,6 +233,17 @@ pub mod tests {
                 });
             }
         }
+    }
+
+    pub fn generate_test_duplex() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
+        let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);
+        (BuffedStream::new(a), BuffedStream::new(b))
+    }
+
+    pub fn generate_test_duplex_with_encryption() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
+        let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);
+        let shared_secret = generate_test_shared_secret();
+        (BuffedStream::new(a).with_encryption(shared_secret), BuffedStream::new(b).with_encryption(shared_secret))
     }
 
     pub fn generate_test_ephemeral_key_pair() -> EphemeralKeyPair {
@@ -342,8 +344,32 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_handle_pump() {
-        let (mut client, mut server1) = tokio::io::duplex(1024);
-        let (mut server2, mut remote) = tokio::io::duplex(1024);
+        let (mut client, mut server1) = generate_test_duplex();
+        let (mut server2, mut remote) = generate_test_duplex();
+
+        client.write_all(b"Hello, remote!").await.unwrap();
+        client.shutdown().await.unwrap();
+        remote.write_all(b"Hello, client!!").await.unwrap();
+        remote.shutdown().await.unwrap();
+
+        let (up, down) = handle_pump(&mut server1, &mut server2).await.unwrap();
+
+        assert_eq!(up, 14);
+        assert_eq!(down, 15);
+
+        let mut client_received = vec![];
+        client.read_to_end(&mut client_received).await.unwrap();
+        assert_eq!(client_received, b"Hello, client!!");
+
+        let mut remote_received = vec![];
+        remote.read_to_end(&mut remote_received).await.unwrap();
+        assert_eq!(remote_received, b"Hello, remote!");
+    }
+
+    #[tokio::test]
+    async fn test_handle_pump_with_encryption() {
+        let (mut client, mut server1) = generate_test_duplex_with_encryption();
+        let (mut server2, mut remote) = generate_test_duplex_with_encryption();
 
         client.write_all(b"Hello, remote!").await.unwrap();
         client.shutdown().await.unwrap();

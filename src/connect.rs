@@ -1,10 +1,7 @@
-use std::{io::ErrorKind, marker::PhantomData, time::Duration};
+use std::marker::PhantomData;
 
 use anyhow::Context;
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, TcpStream},
-};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
@@ -53,7 +50,7 @@ impl Instance<ReadyState> {
             .into_iter()
             .map(|tunnel_definition| {
                 // Schedule a test connection.
-                tokio::spawn(test_tcp_connection(tunnel_definition.bind_address.clone()));
+                tokio::spawn(test_server_connection(tunnel_definition.clone(), self.config.clone()));
 
                 // Start the server.
                 tokio::spawn(run_tcp_server(tunnel_definition, self.config.clone()))
@@ -75,9 +72,13 @@ where
     T: BincodeSend + BincodeReceive,
 {
     // If we want to request encryption, we need to generate an ephemeral key pair, and send the public key to the server.
-    let ephemeral_key_pair = generate_ephemeral_key_pair()?;
+    let local_ephemeral_key_pair = generate_ephemeral_key_pair()?;
     let peer_public_key = if should_encrypt {
-        &ephemeral_key_pair.public_key.as_ref().try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?
+        &local_ephemeral_key_pair
+            .public_key
+            .as_ref()
+            .try_into()
+            .map_err(|_| Err::msg("Could not convert peer public key to array"))?
     } else {
         &Constant::NULL_PEER_PUBLIC_KEY
     };
@@ -87,14 +88,14 @@ where
 
     // Await the handshake response.
 
-    let ProtocolMessage::HandshakeCompletion(peer_public_key) = stream.pull().await?.fail_if_error()? else {
+    let ProtocolMessage::HandshakeCompletion(local_public_key) = stream.pull().await?.fail_if_error()? else {
         return Err(Err::msg("Handshake failed: improper message type (expected handshake completion)"));
     };
 
     // Compute the ephemeral data.
     let ephemeral_data = EphemeralData {
-        ephemeral_key_pair,
-        peer_public_key,
+        local_ephemeral_key_pair,
+        local_public_key,
         challenge,
     };
 
@@ -147,6 +148,7 @@ async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
         );
 
         loop {
+            // TODO: Don't "accept" until the handshake is complete with the server?
             let (socket, _) = listener.accept().await?;
 
             tokio::spawn(handle_tcp(socket, tunnel_definition.remote_address.clone(), config.clone()));
@@ -176,8 +178,8 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         // Generate and apply the shared secret, if needed.
         if config.should_encrypt {
-            let private_key = ephemeral_data.ephemeral_key_pair.private_key;
-            let peer_public_key = ephemeral_data.peer_public_key;
+            let private_key = ephemeral_data.local_ephemeral_key_pair.private_key;
+            let peer_public_key = ephemeral_data.local_public_key;
             let challenge = ephemeral_data.challenge;
 
             let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
@@ -217,46 +219,24 @@ async fn remote_connect_tcp(connext_address: &str) -> Res<TcpStream> {
     Ok(stream)
 }
 
-async fn test_tcp_connection(bind_address: String) {
-    info!("⏳ Testing TCP connection ...");
+async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Config) -> Void {
+    info!("⏳ Testing server connection ...");
 
-    let result = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(bind_address)).await;
+    // Connect to the server.
+    let mut remote = BuffedStream::new(remote_connect_tcp(&config.connect_address).await?);
 
-    let mut stream = match result {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(err)) => {
-            error!("❌ Error connecting to TCP server: {}", err);
-            return;
-        }
-        Err(_) => {
-            error!("❌ Timeout connecting to TCP server");
-            return;
-        }
-    };
-
-    // For our test connect, we attempt to read a `u8`.  If it times out, that's "good", since it means that this instance was likely able to
-    // complete the handshake with the server.  If it fails with EOF, then the handshake was likely not completed, so this test socket was closed
-    // by this instance.
-    // Therefore:
-    // - Timeout: good.
-    // - EOF: bad.
-
-    let result = tokio::time::timeout(Duration::from_secs(1), stream.read_u8()).await;
-
-    match result {
-        Ok(Ok(_)) => panic!("This should never happen.  The read test should not have bytes to read."),
-        Ok(Err(err)) => {
-            if err.kind() == ErrorKind::UnexpectedEof {
-                error!("❌ The test socket was closed, which indicates the handshake may have failed.");
-            } else {
-                error!("❌ Another error occurred reading from TCP connection test (this may be OK): {}", err);
-            }
-        }
-        Err(_) => {}
+    // Handle the handshake.
+    if let Err(e) = handle_handshake(&mut remote, &config.private_key, &tunnel_definition.remote_address, config.should_encrypt).await {
+        error!("❌ Test connection failed: {}", e);
+        return Err(e);
     }
+
+    info!("✅ Test connection successful!");
+
+    Ok(())
 }
 
-// Statics.
+// Config.
 
 #[derive(Clone)]
 struct Config {
@@ -279,7 +259,13 @@ impl Config {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::{protocol::ProtocolError, utils::tests::generate_test_fake_peer_public_key};
+    use crate::{
+        protocol::ProtocolError,
+        utils::{
+            generate_key_pair,
+            tests::{generate_test_duplex, generate_test_fake_peer_public_key},
+        },
+    };
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -302,13 +288,10 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_send_preamble() {
-        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
+        let (mut client, mut server) = generate_test_duplex();
         let peer_public_key = &generate_test_fake_peer_public_key();
 
         let remote_address = "remote_address:3000";
-
-        let mut client = BuffedStream::new(client);
-        let mut server = BuffedStream::new(server);
 
         send_preamble(&mut client, remote_address, peer_public_key).await.unwrap();
         let received = server.pull().await.unwrap();
@@ -322,34 +305,74 @@ pub mod tests {
         );
     }
 
-    // #[tokio::test]
-    // async fn handle_failed_key_handshake_response() {
-    //     let (mut client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-    //     let message = "foo";
+    #[tokio::test]
+    async fn test_handle_handshake_response() {
+        let (mut client, mut server) = generate_test_duplex();
+        let key = generate_key_pair().unwrap().private_key;
+        let peer_public_key = b"this is a peer public key with s";
 
-    //     handle_challenge(&mut client, message).await.unwrap();
+        // Have the server send a challenge.
+        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
+        let handshake_response_message = ProtocolMessage::HandshakeCompletion(peer_public_key.to_owned());
+        server.push(challenge_message).await.unwrap();
+        server.push(handshake_response_message).await.unwrap();
 
-    //     let result = handle_handshake_response(&mut server).await;
-    // }
+        let result = handle_handshake(&mut client, &key, "remote_address", false).await.unwrap();
 
-    // #[tokio::test]
-    // async fn handle_failed_host_handshake_response() {
-    //     let message = "foo";
-    //     let mut stream = BuffedStream::new(MockStream::new([Constant::ERROR_INVALID_HOST, message.as_bytes(), Constant::DELIMITER].concat(), vec![]));
+        assert_eq!(result.local_public_key, *peer_public_key);
+    }
 
-    //     let result = handle_handshake_response(&mut stream).await;
+    #[tokio::test]
+    async fn test_handle_failed_key_handshake_response() {
+        let (mut client, mut server) = generate_test_duplex();
+        let key = generate_key_pair().unwrap().private_key;
+        let error_message = "error_message";
 
-    //     assert!(result.is_err());
-    //     assert_eq!(result.err().unwrap().to_string(), format!("Handshake failed (invalid host): {}", message));
-    // }
+        // Have the server send a challenge.
+        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
+        let handshake_response_message = ProtocolMessage::Error(ProtocolError::InvalidKey(error_message.to_string()));
+        server.push(challenge_message).await.unwrap();
+        server.push(handshake_response_message).await.unwrap();
 
-    // #[tokio::test]
-    // async fn handle_failed_unknown_handshake_response() {
-    //     let mut stream = BuffedStream::new(MockStream::new([&[0x00], Constant::DELIMITER].concat(), vec![]));
+        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
 
-    //     let result = handle_handshake_response(&mut stream).await;
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), format!("Invalid key: {}", error_message));
+    }
 
-    //     assert!(result.is_err());
-    //     assert_eq!(result.err().unwrap().to_string(), "Handshake failed (unknown error)");
-    // }
+    #[tokio::test]
+    async fn test_handle_failed_host_handshake_response() {
+        let (mut client, mut server) = generate_test_duplex();
+        let key = generate_key_pair().unwrap().private_key;
+        let error_message = "error_message";
+
+        // Have the server send a challenge.
+        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
+        let handshake_response_message = ProtocolMessage::Error(ProtocolError::InvalidHost(error_message.to_string()));
+        server.push(challenge_message).await.unwrap();
+        server.push(handshake_response_message).await.unwrap();
+
+        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), format!("Invalid host: {}", error_message));
+    }
+
+    #[tokio::test]
+    async fn test_handle_failed_unknown_handshake_response() {
+        let (mut client, mut server) = generate_test_duplex();
+        let key = generate_key_pair().unwrap().private_key;
+        let error_message = "error_message";
+
+        // Have the server send a challenge.
+        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
+        let handshake_response_message = ProtocolMessage::Error(ProtocolError::Unknown(error_message.to_string()));
+        server.push(challenge_message).await.unwrap();
+        server.push(handshake_response_message).await.unwrap();
+
+        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), format!("Unknown: {}", error_message));
+    }
 }

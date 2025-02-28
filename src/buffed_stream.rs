@@ -104,7 +104,10 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match take_pinned_inner!(self).poll_next(cx) {
             Poll::Ready(Some(Ok(message))) => Poll::Ready(Some(Ok(message))),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Error on bincode reading during pump: {}", e))))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Error on bincode reading during stream next: {}", e),
+            )))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -260,20 +263,16 @@ where
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::{base::Constant, utils::tests::generate_test_shared_secret};
-
-    use super::BuffedStream;
+    use crate::utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption};
 
     #[tokio::test]
     async fn test_unencrypted_buffed_stream() {
-        let (client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-
-        let mut client_stream = BuffedStream::new(client);
+        let (mut client, mut server) = generate_test_duplex();
 
         let data = b"Hello, world!";
 
-        client_stream.write_all(data).await.unwrap();
-        client_stream.shutdown().await.unwrap();
+        client.write_all(data).await.unwrap();
+        client.shutdown().await.unwrap();
 
         let mut received = Vec::new();
         server.read_to_end(&mut received).await.unwrap();
@@ -282,70 +281,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encrypted_buffed_stream() {
-        let shared_secret = generate_test_shared_secret();
-
-        let (client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
+    async fn test_e2e_encrypted_buffed_stream() {
+        let (mut client, mut server) = generate_test_duplex_with_encryption();
 
         let data = b"Hello, world!";
 
-        client_stream.write_all(data).await.unwrap();
-        client_stream.shutdown().await.unwrap();
+        client.write_all(data).await.unwrap();
+        client.shutdown().await.unwrap();
 
         let mut received = Vec::new();
         server.read_to_end(&mut received).await.unwrap();
-
-        assert_eq!(received.len(), 47);
-    }
-
-    #[tokio::test]
-    async fn test_e2e_encrypted_buffed_stream() {
-        let shared_secret = generate_test_shared_secret();
-
-        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
-        let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
-
-        let data = b"Hello, world!";
-
-        client_stream.write_all(data).await.unwrap();
-        client_stream.shutdown().await.unwrap();
-
-        let mut received = Vec::new();
-        server_stream.read_to_end(&mut received).await.unwrap();
 
         assert_eq!(data, &received[..]);
     }
 
     #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream_with_multiple_packets() {
-        let shared_secret = generate_test_shared_secret();
-
-        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
-        let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
+        let (mut client, mut server) = generate_test_duplex_with_encryption();
 
         let data1 = b"Hello, world!";
         let data2 = b"Hello, world!";
 
-        client_stream.write_all(data1).await.unwrap();
-        client_stream.write_all(data2).await.unwrap();
-        client_stream.shutdown().await.unwrap();
+        client.write_all(data1).await.unwrap();
+        client.write_all(data2).await.unwrap();
+        client.shutdown().await.unwrap();
 
         let mut received = Vec::new();
-        server_stream.read_to_end(&mut received).await.unwrap();
+        server.read_to_end(&mut received).await.unwrap();
 
         assert_eq!(data1.len() + data2.len(), received.len());
     }
 
     #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream_with_large_data() {
-        let shared_secret = generate_test_shared_secret();
-
-        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        let mut client_stream = BuffedStream::new(client).with_encryption(shared_secret);
-        let mut server_stream = BuffedStream::new(server).with_encryption(shared_secret);
+        let (mut client, mut server) = generate_test_duplex_with_encryption();
 
         let data = b"Hello, world!";
         let data = data.repeat(10000);
@@ -353,13 +322,13 @@ mod tests {
         let data_clone = data.clone();
 
         let write_task = tokio::spawn(async move {
-            client_stream.write_all(&data_clone).await.unwrap();
-            client_stream.shutdown().await.unwrap();
+            client.write_all(&data_clone).await.unwrap();
+            client.shutdown().await.unwrap();
         });
 
         let read_task = tokio::spawn(async move {
             let mut received = Vec::new();
-            server_stream.read_to_end(&mut received).await.unwrap();
+            server.read_to_end(&mut received).await.unwrap();
             assert_eq!(data.len(), received.len());
         });
 

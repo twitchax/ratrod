@@ -156,22 +156,19 @@ impl<'de> Deserialize<'de> for SerializeableSignature {
 
 #[cfg(test)]
 mod tests {
-    use crate::{buffed_stream::BuffedStream, utils::tests::generate_test_fake_peer_public_key};
+    use crate::utils::tests::{generate_test_duplex, generate_test_fake_peer_public_key};
 
     use super::*;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn test_bincode() {
-        let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
+        let (mut client, mut server) = generate_test_duplex();
 
         let data = Preamble {
             remote: "remote".to_string(),
             peer_public_key: generate_test_fake_peer_public_key(),
         };
-
-        let mut client = BuffedStream::new(client);
-        let mut server = BuffedStream::new(server);
 
         client.push(ProtocolMessage::HandshakeStart(data.clone())).await.unwrap();
 

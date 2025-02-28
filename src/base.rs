@@ -40,6 +40,7 @@ pub type SharedSecret = [u8; Constant::SHARED_SECRET_SIZE];
 pub type SharedSecretNonce = [u8; Constant::SHARED_SECRET_NONCE_SIZE];
 
 /// The bind address and host address for the client.
+#[derive(Clone, Debug)]
 pub struct TunnelDefinition {
     pub bind_address: String,
     pub remote_address: String,
@@ -59,15 +60,15 @@ pub struct EphemeralKeyPair {
 
 /// A wrapper for a local ephemeral key pair, and a peer public key.
 pub struct EphemeralData {
-    pub ephemeral_key_pair: EphemeralKeyPair,
-    pub peer_public_key: PeerPublicKey,
+    pub local_ephemeral_key_pair: EphemeralKeyPair,
+    pub local_public_key: PeerPublicKey,
     pub challenge: Challenge,
 }
 
 /// A wrapper for the Preamble, and the EphemeralKeyPair.
 pub struct HandshakeData {
     pub preamble: Preamble,
-    pub ephemeral_key_pair: EphemeralKeyPair,
+    pub local_ephemeral_key_pair: EphemeralKeyPair,
 }
 
 /// A wrapper for encrypted data, and its nonce.

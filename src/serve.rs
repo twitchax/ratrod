@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{Constant, EphemeralData, EphemeralKeyPair, HandshakeData, Res, Void},
+    base::{Constant, EphemeralKeyPair, HandshakeData, Res, Void},
     buffed_stream::BuffedStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, Preamble, ProtocolError, ProtocolMessage},
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, validate_signed_challenge},
@@ -59,7 +59,10 @@ where
     handle_and_validate_key_challenge(stream, public_key, challenge).await?;
     let ephemeral_key_pair = complete_handshake(stream).await?;
 
-    Ok(HandshakeData { preamble, ephemeral_key_pair })
+    Ok(HandshakeData {
+        preamble,
+        local_ephemeral_key_pair: ephemeral_key_pair,
+    })
 }
 
 async fn verify_preamble<T>(stream: &mut T, preamble: &Preamble, remote_regex: &Regex) -> Void
@@ -92,9 +95,7 @@ where
     // Verify the signature.
 
     if validate_signed_challenge(challenge, &signature.into(), public_key).is_err() {
-        return ProtocolError::InvalidKey(format!("Invalid challenge signature from client (supplied `{}`)", public_key))
-            .send_and_bail(stream)
-            .await;
+        return ProtocolError::InvalidKey("Invalid challenge signature from client".into()).send_and_bail(stream).await;
     }
 
     info!("✅ Handshake challenge completed!");
@@ -149,13 +150,6 @@ async fn handle_tcp(client: TcpStream, config: Config) {
             .await
             .context("Error handling handshake")?;
 
-        // Compute the ephemeral data.
-        let ephemeral_data = EphemeralData {
-            ephemeral_key_pair: handshake_data.ephemeral_key_pair,
-            peer_public_key: handshake_data.preamble.peer_public_key,
-            challenge,
-        };
-
         // Extract the remote.
         let remote_address = handshake_data.preamble.remote;
 
@@ -167,9 +161,8 @@ async fn handle_tcp(client: TcpStream, config: Config) {
 
         // Generate and apply the shared secret, if needed.
         if handshake_data.preamble.peer_public_key != Constant::NULL_PEER_PUBLIC_KEY {
-            let private_key = ephemeral_data.ephemeral_key_pair.private_key;
-            let peer_public_key = ephemeral_data.peer_public_key;
-            let challenge = ephemeral_data.challenge;
+            let private_key = handshake_data.local_ephemeral_key_pair.private_key;
+            let peer_public_key = handshake_data.preamble.peer_public_key;
 
             let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
 
@@ -201,7 +194,7 @@ async fn handle_tcp(client: TcpStream, config: Config) {
     }
 }
 
-// Statics.
+// Config.
 
 #[derive(Clone)]
 struct Config {
@@ -222,7 +215,10 @@ impl Config {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use crate::utils::{generate_key_pair, sign_challenge, tests::generate_test_fake_peer_public_key};
+    use crate::utils::{
+        generate_key_pair, sign_challenge,
+        tests::{generate_test_duplex, generate_test_fake_peer_public_key},
+    };
 
     use super::*;
 
@@ -238,102 +234,92 @@ mod tests {
     #[test]
     fn test_cannot_set_unparsable_host_regex() {}
 
-    // #[tokio::test]
-    // async fn test_can_handle_handshake() {
-    //     let (mut client, mut server) = tokio::io::duplex(Constant::BUFFER_SIZE);
-    //     let keypair = generate_key_pair().unwrap();
-    //     let peer_public_key = &generate_test_fake_peer_public_key();
-    //     let remote = "test_remote";
+    #[tokio::test]
+    async fn test_can_handle_handshake() {
+        let (mut client, mut server) = generate_test_duplex();
+        let keypair = generate_key_pair().unwrap();
+        let peer_public_key = &generate_test_fake_peer_public_key();
+        let remote = "test_remote";
+        let challenge = generate_challenge();
 
-    //     // We need to compute the total stream from the client back to the server.
-    //     let challenge = generate_challenge();
-    //     let signature = sign_challenge(&challenge, &keypair.private_key).unwrap();
+        let preamble = Preamble {
+            remote: remote.into(),
+            peer_public_key: *peer_public_key,
+        };
 
-    //     let preamble = Preamble {
-    //         remote: remote.into(),
-    //         peer_public_key: peer_public_key.clone(),
-    //     };
-    //     // Send the preamble and signature.
-    //     client.send(&preamble).await.unwrap();
-    //     client.send(&SerializeableSignature::from(signature)).await.unwrap();
+        // First, send everything from the client to the server.
+        let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());
+        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key).unwrap().into());
 
-    //     // Receive.
-    //     let received_preamble: Preamble = server.receive().await.unwrap();
-    //     let received_signature: Signature = server.receive::<SerializeableSignature>().await.unwrap().into();
+        client.push(preamble_message).await.unwrap();
+        client.push(handshake_message).await.unwrap();
 
-    //     assert_eq!(received_preamble, preamble);
-    //     assert_eq!(received_signature, signature);
-    // }
+        // Then, handle the handshake on the server.
 
-    // #[tokio::test]
-    // async fn test_can_disallow_wrong_challenge_response() {
-    //     let remote = "test_remote";
-    //     let peer_public_key = &generate_test_fake_peer_public_key();
-    //     let error_message = "Invalid handshake response";
+        let handshake_data = handle_handshake(&mut server, &keypair.public_key, &Regex::new(".*").unwrap(), &challenge).await.unwrap();
 
-    //     let client_to_server = [
-    //         &prepare_preamble(remote, peer_public_key).unwrap(),
-    //         Constant::HANDSHAKE_COMPLETION,
-    //         random_string(64).as_bytes(),
-    //         Constant::DELIMITER,
-    //     ]
-    //     .concat();
+        assert_eq!(handshake_data.preamble, preamble);
+    }
 
-    //     let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
+    #[tokio::test]
+    async fn test_can_disallow_wrong_challenge_response() {
+        let (mut client, mut server) = generate_test_duplex();
+        let keypair = generate_key_pair().unwrap();
+        let peer_public_key = &generate_test_fake_peer_public_key();
+        let remote = "test_remote";
+        let challenge = generate_challenge();
+        let bad_key = generate_key_pair().unwrap().private_key;
 
-    //     let preamble_result = handle_handshake(&mut stream, "public_key", &Regex::new(".*").unwrap(), &generate_challenge()).await;
+        let preamble = Preamble {
+            remote: remote.into(),
+            peer_public_key: *peer_public_key,
+        };
 
-    //     assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
+        let bad_signature = sign_challenge(&challenge, &bad_key).unwrap();
 
-    //     let expected_write_stream = [Constant::ERROR_INVALID_KEY, error_message.as_bytes(), Constant::DELIMITER].concat();
+        // First, send everything from the client to the server.
+        let preamble_message = ProtocolMessage::HandshakeStart(preamble);
+        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(bad_signature.into());
 
-    //     let skip = Constant::DELIMITER_SIZE + Constant::CHALLENGE_SIZE + Constant::DELIMITER_SIZE;
-    //     assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
-    // }
+        client.push(preamble_message).await.unwrap();
+        client.push(handshake_message).await.unwrap();
 
-    // #[tokio::test]
-    // async fn test_can_disallow_wrong_key_length() {
-    //     let remote = "test_remote";
-    //     let peer_public_key = &generate_test_fake_peer_public_key();
-    //     let error_message = "Invalid signature length";
+        // Then, handle the handshake on the server.
 
-    //     let client_to_server = [
-    //         &prepare_preamble(remote, peer_public_key).unwrap(),
-    //         Constant::HANDSHAKE_CHALLENGE_RESPONSE,
-    //         random_string(32).as_bytes(),
-    //         Constant::DELIMITER,
-    //     ]
-    //     .concat();
+        let result = handle_handshake(&mut server, &keypair.public_key, &Regex::new(".*").unwrap(), &challenge).await;
 
-    //     let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().to_string(), "Invalid key: Invalid challenge signature from client");
+    }
 
-    //     let preamble_result = handle_handshake(&mut stream, "public_key", &Regex::new(".*").unwrap(), &generate_challenge()).await;
+    #[tokio::test]
+    async fn test_can_disallow_bad_host() {
+        let (mut client, mut server) = generate_test_duplex();
+        let keypair = generate_key_pair().unwrap();
+        let peer_public_key = &generate_test_fake_peer_public_key();
+        let remote = "doesn't match";
+        let challenge = generate_challenge();
 
-    //     assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
+        let preamble = Preamble {
+            remote: remote.into(),
+            peer_public_key: *peer_public_key,
+        };
 
-    //     let expected_write_stream = [Constant::ERROR_INVALID_KEY, error_message.as_bytes(), Constant::DELIMITER].concat();
+        // First, send everything from the client to the server.
+        let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());
+        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key).unwrap().into());
 
-    //     let skip = Constant::DELIMITER_SIZE + Constant::CHALLENGE_SIZE + Constant::DELIMITER_SIZE;
-    //     assert_eq!(stream.get_ref().write[skip..], expected_write_stream);
-    // }
+        client.push(preamble_message).await.unwrap();
+        client.push(handshake_message).await.unwrap();
 
-    // #[tokio::test]
-    // async fn test_can_disallow_bad_host() {
-    //     let key = "test_key";
-    //     let remote = "test_remote";
-    //     let peer_public_key = &generate_test_fake_peer_public_key();
-    //     let error_message = "Invalid host from client (supplied `test_remote`, but need to satisfy `hots`)";
+        // Then, handle the handshake on the server.
 
-    //     let client_to_server = prepare_preamble(remote, peer_public_key).unwrap();
+        let result = handle_handshake(&mut server, &keypair.public_key, &Regex::new("strict").unwrap(), &challenge).await;
 
-    //     let mut stream = BuffedStream::new(MockStream::new(client_to_server, vec![]));
-
-    //     let preamble_result = handle_handshake(&mut stream, key, &Regex::new("hots").unwrap(), &generate_challenge()).await;
-
-    //     assert_eq!(preamble_result.err().unwrap().to_string(), error_message);
-
-    //     let expected_write_stream = [Constant::ERROR_INVALID_HOST, error_message.as_bytes(), Constant::DELIMITER].concat();
-
-    //     assert_eq!(stream.get_ref().write, expected_write_stream);
-    // }
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Invalid host: Invalid host from client (supplied `doesn't match`, but need to satisfy `strict`)"
+        );
+    }
 }
