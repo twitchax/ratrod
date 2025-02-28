@@ -1,4 +1,6 @@
-// Wire types.
+//! Protocol message types and serialization.
+//! 
+//! This module contains the types and serialization methods for the protocol messages.
 
 use std::fmt::{Display, Formatter};
 
@@ -8,6 +10,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::base::{Constant, Err, Res, Void};
+
+// Wire types.
 
 /// A helper type for a challenge.
 pub type Challenge = [u8; Constant::CHALLENGE_SIZE];
@@ -22,7 +26,7 @@ pub type PeerPublicKey = [u8; Constant::PEER_PUBLIC_KEY_SIZE];
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Preamble {
     pub remote: String,
-    pub peer_public_key: PeerPublicKey,
+    pub peer_public_key: Option<PeerPublicKey>,
 }
 
 // Message types.
@@ -31,6 +35,9 @@ pub struct Preamble {
 pub trait BincodeMessage: Serialize + DeserializeOwned {}
 
 /// A helper type for protocol messages.
+/// 
+/// This is the main message type for the protocol. It is used to send and receive messages over the network.
+/// It is also used to serialize and deserialize messages.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProtocolMessage {
     HandshakeStart(Preamble),
@@ -43,6 +50,9 @@ pub enum ProtocolMessage {
 }
 
 impl ProtocolMessage {
+    /// Checks if the message is an error.
+    /// 
+    /// If it is, returns the message wrapped in an error.
     pub fn fail_if_error(self) -> Res<Self> {
         if let ProtocolMessage::Error(error) = self {
             return Err(Err::msg(error));
@@ -57,6 +67,13 @@ impl BincodeMessage for ProtocolMessage {}
 // Message error types.
 
 /// A helper type for protocol errors.
+/// 
+/// This is used to send and receive errors over the network.
+/// It is also used to serialize and deserialize errors.
+/// 
+/// It should not be sent / received over the network, as it 
+/// should be sent as a [`ProtocolMessage::Error`] message.
+/// The type system should prevent this from happening.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProtocolError {
     InvalidHost(String),
@@ -75,6 +92,7 @@ impl Display for ProtocolError {
 }
 
 impl ProtocolError {
+    /// Sends the error message and shuts down the stream.
     pub async fn send_and_bail<T, R>(self, stream: &mut T) -> Res<R>
     where
         T: BincodeSend,
@@ -90,12 +108,21 @@ impl ProtocolError {
 
 // Bincode stream impls.
 
+/// A trait for sending protocol messages over a stream.
+/// 
+/// This impl is designed to ensure that the push method can only be used to send
+/// [`ProtocolMessage`] messages.
 pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpin + Sized {
     fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void> {
         async move { self.send(message).await.map_err(|_| Err::msg("Failed to send message")) }
     }
 }
 
+
+/// A trait for receiving protocol messages over a stream.
+/// 
+/// This impl is designed to ensure that the pull method can only be used to receive
+/// [`ProtocolMessage`] messages.
 pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + AsyncReadExt + Unpin + Sized {
     fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>> {
         async move {
@@ -105,11 +132,14 @@ pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + Asyn
     }
 }
 
+// Blanket impl for BincodeSend and BincodeReceive where T implements `Sink` and `Stream`.
+
 impl<T> BincodeSend for T where Self: Sink<ProtocolMessage> + AsyncWrite + Unpin + Sized {}
 impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + Unpin + Sized {}
 
 // Signature serialization.
 
+/// A helper type for serializing signatures (bincode cannot serialize a `[u8; 64]` our of the box).
 #[derive(Debug, PartialEq, Eq)]
 pub struct SerializeableSignature(pub Signature);
 
@@ -167,7 +197,7 @@ mod tests {
 
         let data = Preamble {
             remote: "remote".to_string(),
-            peer_public_key: generate_test_fake_peer_public_key(),
+            peer_public_key: Some(generate_test_fake_peer_public_key()),
         };
 
         client.push(ProtocolMessage::HandshakeStart(data.clone())).await.unwrap();

@@ -1,3 +1,13 @@
+//! Buffed stream module.
+//! 
+//! This module contains the `BuffedStream` type, which is a wrapper around a stream that provides
+//! buffering and encryption/decryption functionality.
+//! 
+//! It is used to provide a bincode-centric stream that can be used to send and receive data
+//! in a more efficient manner.  In addition, the `AsyncRead` and `AsyncWrite` implementations
+//! are designed to "transparently" handle encryption and decryption of the data being sent
+//! and received (for the "pump" phase of the lifecycle).
+
 use std::{
     ops::Deref,
     pin::Pin,
@@ -16,14 +26,14 @@ use crate::{
 
 // Macros.
 
-/// Macro to get a ref to `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut BufReader<T>>`.
+/// Macro to get a ref to `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut AsyncBincodeStream<T>>`.
 macro_rules! pinned_inner {
     ($self:ident) => {
         Pin::new(&mut $self.inner)
     };
 }
 
-/// Macro to take a `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut BufReader<T>>`.
+/// Macro to take a `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut AsyncBincodeStream<T>>`.
 macro_rules! take_pinned_inner {
     ($self:ident) => {
         Pin::new(&mut $self.get_mut().inner)
@@ -44,8 +54,16 @@ macro_rules! take_pinned_read_stream {
     };
 }
 
-// Type.
+// Types.
 
+/// BuffedStream type.
+/// 
+/// This type is a wrapper around a stream that provides buffering and encryption/decryption functionality.
+/// It is used to provide a bincode-centric stream that can be used to send and receive data
+/// in a more efficient manner.
+/// 
+/// The `shared_secret` field is used to encrypt and decrypt data.
+/// The `read_stream` field is used to buffer data that has been decrypted.
 pub struct BuffedStream<T> {
     inner: AsyncBincodeStream<T, ProtocolMessage, ProtocolMessage, AsyncDestination>,
     shared_secret: Option<SharedSecret>,
@@ -58,6 +76,7 @@ impl<T> BuffedStream<T>
 where
     T: AsyncRead + AsyncWrite,
 {
+    /// Creates a new `BuffedStream` from the given stream.
     pub fn new(stream: T) -> Self {
         Self {
             inner: AsyncBincodeStream::from(stream).for_async(),
@@ -66,6 +85,7 @@ where
         }
     }
 
+    /// Sets the shared secret for the stream, and enables encryption / decryption.
     pub fn with_encryption(mut self, shared_secret: SharedSecret) -> Self {
         self.shared_secret = Some(shared_secret);
         self.read_stream = Some(SimplexStream::new_unsplit(Constant::BUFFER_SIZE));
@@ -184,11 +204,11 @@ where
                     )));
                 }
 
+                // Flush the `read_stream` to ensure that the data is available for reading (see below).
                 ready!(pinned_read_stream!(self).poll_flush(cx)?);
             }
             Poll::Ready(Some(Err(e))) => {
-                // This is the case where we have a bincode error, so we should
-                // return the error.
+                // This is the case where we have a bincode error, so we should return the error.
 
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Error on bincode reading during pump: {}", e))));
             }
@@ -206,7 +226,7 @@ where
         }
 
         // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the
-        // decrypted stream, so we just offload onto its `poll_fill_buf` method.;
+        // decrypted stream, so we just offload onto its `poll_read` method.
         take_pinned_read_stream!(self).poll_read(cx, buf)
     }
 }
@@ -216,9 +236,13 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        // If there is no shared secret, then we are not encrypting the stream,
+        // so we can just write directly to the inner stream.
         if self.shared_secret.is_none() {
             return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
         }
+
+        // Perform the encryption logic.
 
         let key = self.shared_secret.as_ref().unwrap();
 
@@ -241,6 +265,7 @@ where
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to write encrypted packet"))?;
 
         // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
+        // This allows the caller to know how much of _their_ data was written, which is all that matters.
         Poll::Ready(Ok(buf.len()))
     }
 

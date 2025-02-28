@@ -1,10 +1,15 @@
+//! Ratrod
+//! 
+//! A (likely semi-inefficient) TCP tunneler that uses public/private key authentication with encryption.
+//! Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
+
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
 
-use anyhow::Context;
 use base::{Err, Void};
 use clap::{Parser, Subcommand};
-use tracing::{error, info};
+use keypair::{generate, resolve_private_key, resolve_public_key};
+use tracing::error;
 
 pub mod base;
 pub mod buffed_stream;
@@ -12,6 +17,7 @@ pub mod connect;
 pub mod protocol;
 pub mod serve;
 pub mod utils;
+pub mod keypair;
 
 #[coverage(off)]
 #[tokio::main]
@@ -39,27 +45,19 @@ async fn main() {
 }
 
 async fn execute_command(command: Option<Command>) -> Void {
+    
+
     match command {
         Some(Command::Serve { bind, key, remote_regex }) => {
-            let pair = match key {
-                Some(key) => utils::generate_key_pair_from_key(&key),
-                None => utils::generate_key_pair(),
-            }
-            .context("Failed to generate keypair")?;
-
-            info!("🔑 Private key (for clients): `{}`.", pair.private_key);
-
-            info!("🚀 Starting server on `{}` ...", bind);
-
-            serve::Instance::prepare(pair.public_key, remote_regex, bind)?.start().await?;
+            let public_key = resolve_public_key(key)?;
+            serve::Instance::prepare(public_key, remote_regex, bind)?.start().await?;
         }
         Some(Command::Connect { server, tunnel, key, encrypt }) => {
-            connect::Instance::prepare(key, server, &tunnel, encrypt)?.start().await?;
+            let private_key = resolve_private_key(key)?;
+            connect::Instance::prepare(private_key, server, &tunnel, encrypt)?.start().await?;
         }
-        Some(Command::GenerateKeypair) => {
-            let pair = utils::generate_key_pair().unwrap();
-            info!("📢 Public key: `{}`", pair.public_key);
-            info!("🔑 Private key: `{}`", pair.private_key);
+        Some(Command::GenerateKeypair { print, location, filename }) => {
+            generate(print, location, filename)?;
         }
         None => {
             return Err(Err::msg("No command specified."));
@@ -99,9 +97,11 @@ enum Command {
         /// machines on a specific interface.
         bind: String,
 
-        /// Specifies an optional private key to use for generating the keypair.
+        /// Specifies a public key to use for authentication from connecting clients.  This can be either
+        /// a base64-encoded keyfile, or a base64-encoded key.
         ///
-        /// Otherwise, a random keypair is generated.
+        /// The key is checked at connection time.
+        /// The key is not used for encryption.  The default value is read from `$HOME/.ratrod/key`.
         #[arg(short, long)]
         key: Option<String>,
 
@@ -144,12 +144,13 @@ enum Command {
         ///   must act as a TCP proxy.
         tunnel: Vec<String>,
 
-        /// Specifies an optional key to use for authentication from connecting clients.
+        /// Specifies a private key to use for authentication from connecting clients.  This can be either
+        /// a base64-encoded keyfile, or a base64-encoded key.
         ///
-        /// The key is hashed with a salt, and thrown away, but otherwise is merely checked at connection time.
-        /// The key is not used for encryption.
-        #[arg(short, long, default_value = "")]
-        key: String,
+        /// The key is checked at connection time.
+        /// The key is not used for encryption.  The default value is read from `$HOME/.ratrod/key`.
+        #[arg(short, long)]
+        key: Option<String>,
 
         /// Specifies whether to encrypt the traffic between the client and server.
         ///
@@ -163,7 +164,19 @@ enum Command {
     /// This allows the user to easily get a keypair for use
     /// with the `serve` command, if they are looking for a
     /// stable keypair.
-    GenerateKeypair,
+    GenerateKeypair {
+        /// Specifies that the keypair should be printed to stdout.
+        #[arg(short, long)]
+        print: bool,
+
+        /// Specifies the location to write the keypair to (the default is `$HOME/.ratrod`).
+        #[arg(short, long)]
+        location: Option<String>,
+
+        /// Indicates the filename to write the keypair to (the default is `key`).
+        #[arg(short, long, default_value = "key")]
+        filename: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -197,9 +210,11 @@ mod tests {
         // Start a "client".
         tokio::spawn(connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
 
-        // Give a moment for the server to start.
+        // Do a "healthcheck" to ensure that the server is up and running.
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        while TcpStream::connect(&client_addresses[0]).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         client_addresses
     }
@@ -224,7 +239,7 @@ mod tests {
             Some(Command::Connect {
                 server: "127.0.0.1:3000".to_string(),
                 tunnel: vec!["3000:127.0.0.1:3000".to_string(), "4000".to_string()],
-                key: "key".to_string(),
+                key: Some("key".to_string()),
                 encrypt: true
             })
         );

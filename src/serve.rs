@@ -1,3 +1,5 @@
+//! This module implements the server-side of the protocol.
+
 use std::marker::PhantomData;
 
 use anyhow::Context;
@@ -6,7 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{Constant, EphemeralKeyPair, HandshakeData, Res, Void},
+    base::{EphemeralKeyPair, ServerHandshakeData, Res, Void},
     buffed_stream::BuffedStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, Preamble, ProtocolError, ProtocolMessage},
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, validate_signed_challenge},
@@ -14,15 +16,21 @@ use crate::{
 
 // State machine.
 
+/// The server is in the configuration state.
 pub struct ConfigState;
+/// The server is in the ready state.
 pub struct ReadyState;
 
+/// The server instance.
+/// 
+/// This is the main entry point for the server. It is used to prepare the server, and start it.
 pub struct Instance<S = ConfigState> {
     config: Config,
     _phantom: PhantomData<S>,
 }
 
 impl Instance<ConfigState> {
+    /// Prepares the server instance.
     pub fn prepare<A, B, C>(public_key: A, remote_regex: B, bind_address: C) -> Res<Instance<ReadyState>>
     where
         A: Into<String>,
@@ -38,7 +46,10 @@ impl Instance<ConfigState> {
 }
 
 impl Instance<ReadyState> {
+    /// Starts the server instance.
     pub async fn start(self) -> Void {
+        info!("🚀 Starting server on `{}` ...", self.config.bind_address);
+
         run_tcp_server(self.config).await?;
 
         Ok(())
@@ -47,24 +58,9 @@ impl Instance<ReadyState> {
 
 // Operations.
 
-async fn handle_handshake<T>(stream: &mut T, public_key: &str, remote_regex: &Regex, challenge: &Challenge) -> Res<HandshakeData>
-where
-    T: BincodeReceive + BincodeSend,
-{
-    let ProtocolMessage::HandshakeStart(preamble) = stream.pull().await? else {
-        return ProtocolError::Unknown("Invalid handshake start".into()).send_and_bail(stream).await;
-    };
-
-    verify_preamble(stream, &preamble, remote_regex).await?;
-    handle_and_validate_key_challenge(stream, public_key, challenge).await?;
-    let ephemeral_key_pair = complete_handshake(stream).await?;
-
-    Ok(HandshakeData {
-        preamble,
-        local_ephemeral_key_pair: ephemeral_key_pair,
-    })
-}
-
+/// Verifies the preamble from the client.
+/// 
+/// This is used to ensure that the client is allowed to connect to the specified remote.
 async fn verify_preamble<T>(stream: &mut T, preamble: &Preamble, remote_regex: &Regex) -> Void
 where
     T: BincodeSend,
@@ -78,6 +74,10 @@ where
     Ok(())
 }
 
+/// Handles the key challenge from the client.
+/// 
+/// This is used to ensure that the client is allowed to connect to the server.
+/// It also verifies the signature of the challenge from the client, authenticating the client.
 async fn handle_and_validate_key_challenge<T>(stream: &mut T, public_key: &str, challenge: &Challenge) -> Void
 where
     T: BincodeSend + BincodeReceive,
@@ -103,6 +103,10 @@ where
     Ok(())
 }
 
+/// Completes the handshake.
+/// 
+/// This is used to send the server's ephemeral public key to the client
+/// for the key exchange.
 async fn complete_handshake<T>(stream: &mut T) -> Res<EphemeralKeyPair>
 where
     T: BincodeSend,
@@ -119,6 +123,31 @@ where
     Ok(ephemeral_key_pair)
 }
 
+/// Handles the e2e handshake.
+/// 
+/// This is used to handle the handshake between the client and server.
+/// It verifies the preamble, handles the key challenge, and completes the handshake.
+async fn handle_handshake<T>(stream: &mut T, public_key: &str, remote_regex: &Regex, challenge: &Challenge) -> Res<ServerHandshakeData>
+where
+    T: BincodeReceive + BincodeSend,
+{
+    let ProtocolMessage::HandshakeStart(preamble) = stream.pull().await? else {
+        return ProtocolError::Unknown("Invalid handshake start".into()).send_and_bail(stream).await;
+    };
+
+    verify_preamble(stream, &preamble, remote_regex).await?;
+    handle_and_validate_key_challenge(stream, public_key, challenge).await?;
+    let ephemeral_key_pair = complete_handshake(stream).await?;
+
+    Ok(ServerHandshakeData {
+        preamble,
+        local_ephemeral_key_pair: ephemeral_key_pair,
+    })
+}
+
+/// Runs the TCP server.
+/// 
+/// This is the main entry point for the server. It binds to the specified address, and handles incoming connections.
 async fn run_tcp_server(config: Config) -> Void {
     let listener = TcpListener::bind(&config.bind_address).await?;
 
@@ -129,6 +158,10 @@ async fn run_tcp_server(config: Config) -> Void {
     }
 }
 
+/// Handles the TCP connection.
+/// 
+/// This is used to handle the TCP connection between the client and server.
+/// It handles the handshake, and pumps data between the client and server.
 async fn handle_tcp(client: TcpStream, config: Config) {
     let mut client = BuffedStream::new(client);
 
@@ -144,7 +177,7 @@ async fn handle_tcp(client: TcpStream, config: Config) {
 
         let challenge = generate_challenge();
 
-        // Handle the preamble.
+        // Handle the handshake.
 
         let handshake_data = handle_handshake(&mut client, &config.public_key, &config.remote_regex, &challenge)
             .await
@@ -160,9 +193,8 @@ async fn handle_tcp(client: TcpStream, config: Config) {
         info!("✅ Connected to remote server `{}`.", remote_address);
 
         // Generate and apply the shared secret, if needed.
-        if handshake_data.preamble.peer_public_key != Constant::NULL_PEER_PUBLIC_KEY {
+        if let Some(peer_public_key) = handshake_data.preamble.peer_public_key {
             let private_key = handshake_data.local_ephemeral_key_pair.private_key;
-            let peer_public_key = handshake_data.preamble.peer_public_key;
 
             let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
 
@@ -196,6 +228,9 @@ async fn handle_tcp(client: TcpStream, config: Config) {
 
 // Config.
 
+/// The server configuration.
+/// 
+/// This is used to store the server's configuration.
 #[derive(Clone)]
 struct Config {
     public_key: String,
@@ -204,6 +239,7 @@ struct Config {
 }
 
 impl Config {
+    /// Creates a new server configuration.
     fn new(public_key: String, bind_address: String, remote_regex: Regex) -> Self {
         Self { public_key, bind_address, remote_regex }
     }
@@ -238,13 +274,13 @@ mod tests {
     async fn test_can_handle_handshake() {
         let (mut client, mut server) = generate_test_duplex();
         let keypair = generate_key_pair().unwrap();
-        let peer_public_key = &generate_test_fake_peer_public_key();
+        let peer_public_key = Some(generate_test_fake_peer_public_key());
         let remote = "test_remote";
         let challenge = generate_challenge();
 
         let preamble = Preamble {
             remote: remote.into(),
-            peer_public_key: *peer_public_key,
+            peer_public_key,
         };
 
         // First, send everything from the client to the server.
@@ -265,14 +301,14 @@ mod tests {
     async fn test_can_disallow_wrong_challenge_response() {
         let (mut client, mut server) = generate_test_duplex();
         let keypair = generate_key_pair().unwrap();
-        let peer_public_key = &generate_test_fake_peer_public_key();
+        let peer_public_key = Some(generate_test_fake_peer_public_key());
         let remote = "test_remote";
         let challenge = generate_challenge();
         let bad_key = generate_key_pair().unwrap().private_key;
 
         let preamble = Preamble {
             remote: remote.into(),
-            peer_public_key: *peer_public_key,
+            peer_public_key,
         };
 
         let bad_signature = sign_challenge(&challenge, &bad_key).unwrap();
@@ -296,13 +332,13 @@ mod tests {
     async fn test_can_disallow_bad_host() {
         let (mut client, mut server) = generate_test_duplex();
         let keypair = generate_key_pair().unwrap();
-        let peer_public_key = &generate_test_fake_peer_public_key();
+        let peer_public_key = Some(generate_test_fake_peer_public_key());
         let remote = "doesn't match";
         let challenge = generate_challenge();
 
         let preamble = Preamble {
             remote: remote.into(),
-            peer_public_key: *peer_public_key,
+            peer_public_key,
         };
 
         // First, send everything from the client to the server.

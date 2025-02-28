@@ -20,6 +20,7 @@ base64 = { version = "0.22.1" }
 futures = { version = "0.3.31" }
 async-bincode = { version = "0.7.3" }
 serde = { version = "1.0.218", features = ["derive"] }
+homedir = { version = "0.3.4" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

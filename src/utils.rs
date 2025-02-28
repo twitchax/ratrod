@@ -1,3 +1,8 @@
+//! Utility functions for the application.
+//! 
+//! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
+//! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
+
 use anyhow::Context;
 use base64::Engine;
 use rand::{Rng, distr::Alphanumeric};
