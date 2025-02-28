@@ -53,7 +53,7 @@ pub fn resolve_private_key(key: Option<String>) -> Res<String> {
         Some(key) => {
             // First, see if the user provided as a command line argument.
             if Constant::BASE64_ENGINE.decode(&key).is_ok() {
-                return Ok(key);
+                return Ok(key.trim().to_string());
             }
 
             // The key is likely a file path.
@@ -66,7 +66,7 @@ pub fn resolve_private_key(key: Option<String>) -> Res<String> {
         }
     };
 
-    std::fs::read_to_string(&path).context("Failed to read private key")
+    std::fs::read_to_string(&path).context("Failed to read private key").map(|s| s.trim().to_string())
 }
 
 /// Resolves the public key from a file or string.
@@ -75,7 +75,7 @@ pub fn resolve_public_key(key: Option<String>) -> Res<String> {
         Some(key) => {
             // First, see if the user provided as a command line argument.
             if Constant::BASE64_ENGINE.decode(&key).is_ok() {
-                return Ok(key);
+                return Ok(key.trim().to_string());
             }
 
             // The key is likely a file path.
@@ -88,7 +88,7 @@ pub fn resolve_public_key(key: Option<String>) -> Res<String> {
         }
     };
 
-    std::fs::read_to_string(&path).context("Failed to read public key")
+    std::fs::read_to_string(&path).context("Failed to read public key").map(|s| s.trim().to_string())
 }
 
 #[cfg(test)]
