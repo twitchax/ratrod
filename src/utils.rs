@@ -13,11 +13,12 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
     signature::{Ed25519KeyPair, KeyPair},
 };
+use secrecy::{ExposeSecret, SecretString};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
 use crate::{
-    base::{Base64KeyPair, Constant, EncryptedData, EphemeralKeyPair, Err, Res, SharedSecret, SharedSecretNonce, TunnelDefinition, Void},
+    base::{Base64KeyPair, Constant, EncryptedData, EphemeralKeyPair, Err, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void},
     protocol::{Challenge, PeerPublicKey, Signature},
 };
 
@@ -57,10 +58,10 @@ pub fn generate_challenge() -> Challenge {
     challenge
 }
 
-pub fn sign_challenge(challenge: &Challenge, private_key: &str) -> Res<Signature> {
+pub fn sign_challenge(challenge: &Challenge, private_key: &SecretString) -> Res<Signature> {
     debug!("Challenge: `{:?}`", challenge);
 
-    let private_key = Constant::BASE64_ENGINE.decode(private_key).context("Could not decode private key")?;
+    let private_key = Constant::BASE64_ENGINE.decode(private_key.expose_secret()).context("Could not decode private key")?;
     debug!("Signing challenge with private key: {:?}", &private_key);
 
     let key_pair = Ed25519KeyPair::from_pkcs8(&private_key).map_err(|_| Err::msg("Invalid private key"))?;
@@ -98,18 +99,18 @@ fn generate_chacha_key(private_key: &[u8], challenge: &[u8]) -> Res<SharedSecret
     let prk = salt.extract(private_key);
     let okm = prk.expand(info, Constant::KDF)?;
 
-    let mut key = SharedSecret::default();
+    let mut key = SharedSecretShape::default();
     okm.fill(&mut key)?;
 
-    Ok(key)
+    Ok(SharedSecret::init_with(|| key))
 }
 
-pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
+pub fn encrypt(shared_secret: &SharedSecret, plaintext: &[u8]) -> Res<EncryptedData> {
     let rng = SystemRandom::new();
     let mut nonce_bytes = [0u8; Constant::SHARED_SECRET_NONCE_SIZE];
     rng.fill(&mut nonce_bytes).context("Could not fill nonce for encryption")?;
 
-    let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for encryption")?;
+    let unbound_key = UnboundKey::new(Constant::AEAD, shared_secret.expose_secret()).context("Could not generate unbound key for encryption")?;
     let sealing_key = LessSafeKey::new(unbound_key);
     let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
@@ -123,8 +124,8 @@ pub fn encrypt(chacha_key: &[u8], plaintext: &[u8]) -> Res<EncryptedData> {
     Ok(EncryptedData { nonce: nonce_bytes, data: in_out })
 }
 
-pub fn decrypt(chacha_key: &[u8], ciphertext: &[u8], nonce_bytes: &SharedSecretNonce) -> Res<Vec<u8>> {
-    let unbound_key = UnboundKey::new(Constant::AEAD, chacha_key).context("Could not generate unbound key for decryption")?;
+pub fn decrypt(shared_secret: &SharedSecret, ciphertext: &[u8], nonce_bytes: &SharedSecretNonce) -> Res<Vec<u8>> {
+    let unbound_key = UnboundKey::new(Constant::AEAD, shared_secret.expose_secret()).context("Could not generate unbound key for decryption")?;
     let opening_key = LessSafeKey::new(unbound_key);
     let nonce = Nonce::assume_unique_for_key(*nonce_bytes);
 
@@ -229,8 +230,10 @@ pub mod tests {
 
     pub fn generate_test_duplex_with_encryption() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
         let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        let shared_secret = generate_test_shared_secret();
-        (BuffedStream::new(a).with_encryption(shared_secret), BuffedStream::new(b).with_encryption(shared_secret))
+        let secret_box = generate_test_shared_secret();
+        let shared_secret = secret_box.expose_secret();
+
+        (BuffedStream::new(a).with_encryption(SharedSecret::init_with(|| *shared_secret)), BuffedStream::new(b).with_encryption(SharedSecret::init_with(|| *shared_secret)))
     }
 
     pub fn generate_test_ephemeral_key_pair() -> EphemeralKeyPair {
@@ -268,7 +271,7 @@ pub mod tests {
         let key_pair = generate_key_pair().unwrap();
 
         let challenge = generate_challenge();
-        let signature = sign_challenge(&challenge, &key_pair.private_key).unwrap();
+        let signature = sign_challenge(&challenge, &key_pair.private_key.into()).unwrap();
 
         validate_signed_challenge(&challenge, &signature, &key_pair.public_key).unwrap();
     }
@@ -282,8 +285,8 @@ pub mod tests {
         let shared_secret_1 = generate_shared_secret(ephemeral_key_pair_1.private_key, ephemeral_key_pair_2.public_key.as_ref().try_into().unwrap(), &challenge).unwrap();
         let shared_secret_2 = generate_shared_secret(ephemeral_key_pair_2.private_key, ephemeral_key_pair_1.public_key.as_ref().try_into().unwrap(), &challenge).unwrap();
 
-        assert_eq!(shared_secret_1.len(), Constant::SHARED_SECRET_SIZE);
-        assert_eq!(shared_secret_1, shared_secret_2);
+        assert_eq!(shared_secret_1.expose_secret().len(), Constant::SHARED_SECRET_SIZE);
+        assert_eq!(shared_secret_1.expose_secret(), shared_secret_2.expose_secret());
     }
 
     #[test]

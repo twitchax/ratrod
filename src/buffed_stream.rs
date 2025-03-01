@@ -16,6 +16,7 @@ use std::{
 
 use async_bincode::{AsyncDestination, tokio::AsyncBincodeStream};
 use futures::{Sink, Stream};
+use secrecy::ExposeSecret;
 use tokio::io::{AsyncRead, AsyncWrite, SimplexStream};
 
 use crate::{
@@ -176,7 +177,8 @@ where
 
         // Perform the decryption logic.
 
-        let key = &self.shared_secret.unwrap();
+        // Temporarily getting the shared secret via a "copy" (this is necessary due to mutable borrows below).
+        let key = SharedSecret::init_with(|| *self.shared_secret.as_ref().unwrap().expose_secret());
 
         // Use the bincode reader to get the next packet.
         // TODO: We could actually loop on poll next here until we either get a pending, or we no longer have space in the
@@ -189,7 +191,7 @@ where
                     return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid message type when decrypting")));
                 };
 
-                let Ok(decrypted_data) = decrypt(key, &data, &nonce) else {
+                let Ok(decrypted_data) = decrypt(&key, &data, &nonce) else {
                     return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed")));
                 };
 

@@ -282,7 +282,7 @@ mod tests {
 
         // First, send everything from the client to the server.
         let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());
-        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key).unwrap().into());
+        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key.into()).unwrap().into());
 
         client.push(preamble_message).await.unwrap();
         client.push(handshake_message).await.unwrap();
@@ -305,7 +305,7 @@ mod tests {
 
         let preamble = Preamble { remote: remote.into(), peer_public_key };
 
-        let bad_signature = sign_challenge(&challenge, &bad_key).unwrap();
+        let bad_signature = sign_challenge(&challenge, &bad_key.into()).unwrap();
 
         // First, send everything from the client to the server.
         let preamble_message = ProtocolMessage::HandshakeStart(preamble);
@@ -334,7 +334,7 @@ mod tests {
 
         // First, send everything from the client to the server.
         let preamble_message = ProtocolMessage::HandshakeStart(preamble.clone());
-        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key).unwrap().into());
+        let handshake_message = ProtocolMessage::HandshakeChallengeResponse(sign_challenge(&challenge, &keypair.private_key.into()).unwrap().into());
 
         client.push(preamble_message).await.unwrap();
         client.push(handshake_message).await.unwrap();

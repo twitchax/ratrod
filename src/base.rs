@@ -8,6 +8,7 @@ use ring::{
     agreement::{EphemeralPrivateKey, PublicKey},
     hkdf::{self, HKDF_SHA256},
 };
+use secrecy::SecretBox;
 
 use crate::protocol::{Challenge, PeerPublicKey, Preamble};
 
@@ -41,11 +42,14 @@ impl Constant {
     pub const SIGNATURE_SIZE: usize = 64;
 }
 
+/// A helper for the Shape of the shared secret.
+pub type SharedSecretShape = [u8; Constant::SHARED_SECRET_SIZE];
+
 /// A helper type for a shared secret.
 ///
 /// These are the secrets that each end of the connection will use to encrypt and decrypt data.
 /// They are derived from the ephemeral keys, and DH key exchange.
-pub type SharedSecret = [u8; Constant::SHARED_SECRET_SIZE];
+pub type SharedSecret = SecretBox<SharedSecretShape>;
 
 /// A helper type for a shared secret nonce.
 ///

@@ -5,6 +5,7 @@
 use std::marker::PhantomData;
 
 use anyhow::Context;
+use secrecy::SecretString;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, error, info, info_span};
 
@@ -104,7 +105,7 @@ where
 ///
 /// This is the second message sent to the server. It receives the challenge,
 /// signs it, and sends the signature back to the server.
-async fn handle_challenge<T>(stream: &mut T, private_key: &str) -> Res<ClientHandshakeData>
+async fn handle_challenge<T>(stream: &mut T, private_key: &SecretString) -> Res<ClientHandshakeData>
 where
     T: BincodeSend + BincodeReceive,
 {
@@ -127,7 +128,7 @@ where
 }
 
 /// Handles the handshake with the server.
-async fn handle_handshake<T>(stream: &mut T, private_key: &str, remote_address: &str, should_encrypt: bool) -> Res<ClientKeyExchangeData>
+async fn handle_handshake<T>(stream: &mut T, private_key: &SecretString, remote_address: &str, should_encrypt: bool) -> Res<ClientKeyExchangeData>
 where
     T: BincodeSend + BincodeReceive,
 {
@@ -274,7 +275,7 @@ async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Con
 /// This is used to store the private key, the connect address, and whether or not to encrypt the connection.
 #[derive(Clone)]
 struct Config {
-    private_key: String,
+    private_key: SecretString,
     connect_address: String,
     should_encrypt: bool,
 }
@@ -283,7 +284,7 @@ impl Config {
     /// Creates a new configuration.
     fn new(private_key: String, connect_address: String, should_encrypt: bool) -> Self {
         Self {
-            private_key,
+            private_key: private_key.into(),
             connect_address,
             should_encrypt,
         }
@@ -304,6 +305,7 @@ pub mod tests {
 
     use super::*;
     use pretty_assertions::assert_eq;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_prepare_globals() {
@@ -313,7 +315,7 @@ pub mod tests {
 
         let instance = Instance::prepare(key, connect_address, &tunnel_definitions, false).unwrap();
 
-        assert_eq!(instance.config.private_key, key);
+        assert_eq!(instance.config.private_key.expose_secret(), key);
         assert_eq!(instance.config.connect_address, "connect_address");
         assert_eq!(instance.config.should_encrypt, false);
 
@@ -343,7 +345,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_handle_handshake_response() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key;
+        let key = generate_key_pair().unwrap().private_key.into();
         let peer_public_key = b"this is a peer public key with s";
 
         // Have the server send a challenge.
@@ -360,7 +362,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_handle_failed_key_handshake_response() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key;
+        let key = generate_key_pair().unwrap().private_key.into();
         let error_message = "error_message";
 
         // Have the server send a challenge.
@@ -378,7 +380,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_handle_failed_host_handshake_response() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key;
+        let key = generate_key_pair().unwrap().private_key.into();
         let error_message = "error_message";
 
         // Have the server send a challenge.
@@ -396,7 +398,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_handle_failed_unknown_handshake_response() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key;
+        let key = generate_key_pair().unwrap().private_key.into();
         let error_message = "error_message";
 
         // Have the server send a challenge.

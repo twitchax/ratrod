@@ -100,7 +100,7 @@ mod tests {
     fn test_generate() {
         generate(true, Some("./target/test".to_string()), Some("fake_key".to_string())).unwrap();
 
-        let private_key = resolve_private_key(Some("./target/test/fake_key".to_string())).unwrap();
+        let private_key = resolve_private_key(Some("./target/test/fake_key".to_string())).unwrap().into();
         let public_key = resolve_public_key(Some("./target/test/fake_key.pub".to_string())).unwrap();
 
         let challenge = generate_challenge();
@@ -115,7 +115,7 @@ mod tests {
         let private_key = keypair.private_key;
         let public_key = keypair.public_key;
 
-        let private_key = resolve_private_key(Some(private_key)).unwrap();
+        let private_key = resolve_private_key(Some(private_key)).unwrap().into();
         let public_key = resolve_public_key(Some(public_key)).unwrap();
 
         let challenge = generate_challenge();
