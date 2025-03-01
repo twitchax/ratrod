@@ -6,6 +6,8 @@
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
 
+pub use tokio;
+
 pub mod base;
 pub mod buffed_stream;
 pub mod connect;
