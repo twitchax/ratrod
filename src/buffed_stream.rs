@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite, SimplexStream};
 
 use crate::{
     base::{Constant, SharedSecret},
-    protocol::{BincodeReceive, BincodeSend, ProtocolMessage},
+    protocol::{BincodeReceive, BincodeSend, ProtocolMessage, ProtocolMessageWrapper},
     utils::{decrypt, encrypt},
 };
 
@@ -62,11 +62,16 @@ macro_rules! take_pinned_read_stream {
 /// This type is a wrapper around a stream that provides buffering and encryption/decryption functionality.
 /// It is used to provide a bincode-centric stream that can be used to send and receive data
 /// in a more efficient manner.
+/// 
+/// > This type is used to provide a bincode-centric stream that can be used to send and receive data
+/// > so it is inadvisable to use any other methods than the `push` and `pull` methods from the protocol
+/// > module.  Using `read` and `write` directly will bypass the normal logic, and should only be used when
+/// > you know what you are doing (most common use case is pumping data).
 ///
 /// The `shared_secret` field is used to encrypt and decrypt data.
 /// The `read_stream` field is used to buffer data that has been decrypted.
 pub struct BuffedStream<T> {
-    inner: AsyncBincodeStream<T, ProtocolMessage, ProtocolMessage, AsyncDestination>,
+    inner: AsyncBincodeStream<T, ProtocolMessageWrapper, ProtocolMessageWrapper, AsyncDestination>,
     shared_secret: Option<SharedSecret>,
     read_stream: Option<SimplexStream>,
 }
@@ -123,8 +128,31 @@ where
     type Item = std::io::Result<ProtocolMessage>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Get an option to the shared secret.
+        let key = self.shared_secret.as_ref().map(|s| SharedSecret::init_with(|| *s.expose_secret()));
+
         match take_pinned_inner!(self).poll_next(cx) {
-            Poll::Ready(Some(Ok(message))) => Poll::Ready(Some(Ok(message))),
+            Poll::Ready(Some(Ok(wrapper))) => match wrapper {
+                ProtocolMessageWrapper::Plain(message) => Poll::Ready(Some(Ok(message))),
+                ProtocolMessageWrapper::Encrypted { nonce, data } => {
+                    let Some(key) = key else {
+                        return Poll::Ready(Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Received encrypted message without shared secret on this end",
+                        ))));
+                    };
+
+                    let Ok(decrypted_data) = decrypt(&key, &data, &nonce) else {
+                        return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed"))));
+                    };
+
+                    let Ok(message) = bincode::deserialize::<ProtocolMessage>(&decrypted_data) else {
+                        return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize decrypted data"))));
+                    };
+
+                    Poll::Ready(Some(Ok(message)))
+                }
+            },
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Error on bincode reading during stream next: {}", e),
@@ -148,13 +176,33 @@ where
     }
 
     fn start_send(self: Pin<&mut Self>, item: ProtocolMessage) -> Result<(), Self::Error> {
+        if let Some(key) = self.shared_secret.as_ref() {
+            let encrypted_data = encrypt(
+                key,
+                &bincode::serialize(&item).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to serialize message"))?,
+            )
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Encryption failed"))?;
+
+            let message = ProtocolMessageWrapper::Encrypted {
+                nonce: encrypted_data.nonce,
+                data: encrypted_data.data,
+            };
+
+            take_pinned_inner!(self)
+                .start_send(message)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write encrypted packet: {}", e)))?;
+
+            return Ok(());
+        }
+
         take_pinned_inner!(self)
-            .start_send(item)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write encrypted packet: {}", e)))
+            .start_send(ProtocolMessageWrapper::Plain(item))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write plain packet: {}", e)))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        futures::Sink::<ProtocolMessage>::poll_flush(take_pinned_inner!(self), cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
+        futures::Sink::<ProtocolMessageWrapper>::poll_flush(take_pinned_inner!(self), cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -171,35 +219,29 @@ where
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         // Read directly from the inner stream if there is no shared secret.
         // This is the case where we are not encrypting the stream.
+        //
+        // Basically, this is an optimization that both `poll_read` and `poll_write` can use for 
+        // the case where we are not encrypting the stream.
         if self.shared_secret.is_none() {
             return Pin::new(self.inner.get_mut()).poll_read(cx, buf);
         }
 
-        // Perform the decryption logic.
-
-        // Temporarily getting the shared secret via a "copy" (this is necessary due to mutable borrows below).
-        let key = SharedSecret::init_with(|| *self.shared_secret.as_ref().unwrap().expose_secret());
-
-        // Use the bincode reader to get the next packet.
+        // Use the "self" reader to get the next packet (and perform any needed decryption).
         // TODO: We could actually loop on poll next here until we either get a pending, or we no longer have space in the
         // read stream.
-        let result = pinned_inner!(self).poll_next(cx);
+        let result = self.as_mut().poll_next(cx);
 
         match result {
             Poll::Ready(Some(Ok(message))) => {
-                let ProtocolMessage::EncryptedPacket { nonce, data } = message else {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid message type when decrypting")));
+                let ProtocolMessage::Data(data) = message else {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Received non-data message during `poll_read`, which shouldn't happen")));
                 };
 
-                let Ok(decrypted_data) = decrypt(&key, &data, &nonce) else {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed")));
-                };
-
-                // We have the decrypted data, so we can write it to the `read_stream`.
-                let written = ready!(pinned_read_stream!(self).poll_write(cx, &decrypted_data)?);
+                // We have the data, so we can write it to the `read_stream`.
+                let written = ready!(pinned_read_stream!(self).poll_write(cx, &data)?);
 
                 // Fail if the interim buffer is too small.
-                if written < decrypted_data.len() {
+                if written < data.len() {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
@@ -240,29 +282,23 @@ where
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         // If there is no shared secret, then we are not encrypting the stream,
         // so we can just write directly to the inner stream.
+        //
+        // Basically, this is an optimization that both `poll_read` and `poll_write` can use for 
+        // the case where we are not encrypting the stream.
         if self.shared_secret.is_none() {
             return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
         }
-
-        // Perform the encryption logic.
-
-        let key = self.shared_secret.as_ref().unwrap();
 
         // First, we need to pare down the data to the maximum size of the encrypted data, if needed.
         let max_size = Constant::BUFFER_SIZE - Constant::ENCRYPTION_OVERHEAD;
         let amt = std::cmp::min(buf.len(), max_size);
         let buf = &buf[..amt];
 
-        // Get the actual encrypted data.
-        let encrypted_data = encrypt(key, buf).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Encryption failed"))?;
-
-        let message = ProtocolMessage::EncryptedPacket {
-            nonce: encrypted_data.nonce,
-            data: encrypted_data.data,
-        };
-
-        // Write the encrypted data.
-        pinned_inner!(self)
+        let message = ProtocolMessage::Data(buf.to_vec());
+        
+        // Write the encrypted data to the "self" `start_send`, which performs any needed encryption logic.
+        self
+            .as_mut()
             .start_send(message)
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to write encrypted packet"))?;
 

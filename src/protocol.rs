@@ -63,8 +63,7 @@ pub enum ProtocolMessage {
     ServerPreamble(ServerPreamble),
     ClientAuthentication(ClientAuthentication),
     HandshakeCompletion,
-    PlaintextPacket(Vec<u8>),
-    EncryptedPacket { nonce: [u8; Constant::SHARED_SECRET_NONCE_SIZE], data: Vec<u8> },
+    Data(Vec<u8>),
     Error(ProtocolError),
 }
 
@@ -82,6 +81,13 @@ impl ProtocolMessage {
 }
 
 impl BincodeMessage for ProtocolMessage {}
+
+/// A wrapper type for protocol messages.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProtocolMessageWrapper {
+    Plain(ProtocolMessage),
+    Encrypted { nonce: [u8; Constant::SHARED_SECRET_NONCE_SIZE], data: Vec<u8> },
+}
 
 // Message error types.
 

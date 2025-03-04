@@ -753,6 +753,7 @@ dependencies = [
  "anyhow",
  "async-bincode",
  "base64",
+ "bincode",
  "clap",
  "criterion",
  "futures",
