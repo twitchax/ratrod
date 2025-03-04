@@ -12,8 +12,9 @@ use tracing::{Instrument, error, info, info_span};
 use crate::{
     base::{ClientHandshakeData, ClientKeyExchangeData, Err, Res, TunnelDefinition, Void},
     buffed_stream::BuffedStream,
-    protocol::{BincodeReceive, BincodeSend, PeerPublicKey, Preamble, ProtocolMessage, SerializeableSignature},
-    utils::{generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge},
+    protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ExchangePublicKey, ProtocolMessage},
+    security::{resolve_keypath, resolve_known_hosts, resolve_private_key, resolve_public_key},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -34,15 +35,20 @@ pub struct Instance<S = ConfigState> {
 
 impl Instance<ConfigState> {
     /// Prepares the client instance.
-    pub fn prepare<A, B, C>(private_key: A, connect_address: B, tunnel_definitions: &[C], should_encrypt: bool) -> Res<Instance<ReadyState>>
+    pub fn prepare<A, B, C>(key_path: A, connect_address: B, tunnel_definitions: &[C], should_encrypt: bool) -> Res<Instance<ReadyState>>
     where
-        A: Into<String>,
+        A: Into<Option<String>>,
         B: Into<String>,
         C: AsRef<str>,
     {
         let tunnel_definitions = parse_tunnel_definitions(tunnel_definitions)?;
 
-        let config = Config::new(private_key.into(), connect_address.into(), should_encrypt);
+        let key_path = resolve_keypath(key_path)?;
+        let private_key = resolve_private_key(&key_path)?;
+        let public_key = resolve_public_key(&key_path)?;
+        let known_hosts = resolve_known_hosts(&key_path);
+
+        let config = Config::new(public_key, private_key, known_hosts, connect_address.into(), should_encrypt)?;
 
         Ok(Instance {
             tunnel_definitions,
@@ -85,76 +91,95 @@ impl Instance<ReadyState> {
 ///
 /// This is the first message sent to the server. It contains the remote address and the peer public key
 /// for the future key exchange.
-async fn send_preamble<T>(stream: &mut T, remote_address: &str, peer_public_key: Option<PeerPublicKey>) -> Void
+async fn send_preamble<T, R>(stream: &mut T, config: &Config, remote_address: R, exchange_public_key: ExchangePublicKey) -> Res<Challenge>
 where
     T: BincodeSend,
+    R: Into<String>,
 {
-    let preamble = Preamble {
-        remote: remote_address.to_string(),
-        peer_public_key,
+    let challenge = generate_challenge();
+
+    let preamble = ClientPreamble {
+        exchange_public_key,
+        remote: remote_address.into(),
+        challenge,
+        should_encrypt: config.should_encrypt,
     };
 
-    stream.push(ProtocolMessage::HandshakeStart(preamble)).await?;
+    stream.push(ProtocolMessage::ClientPreamble(preamble)).await?;
 
     info!("✅ Sent preamble to server ...");
 
-    Ok(())
+    Ok(challenge)
 }
 
 /// Handles the challenge from the server.
 ///
 /// This is the second message sent to the server. It receives the challenge,
 /// signs it, and sends the signature back to the server.
-async fn handle_challenge<T>(stream: &mut T, private_key: &SecretString) -> Res<ClientHandshakeData>
+async fn handle_challenge<T>(stream: &mut T, config: &Config, client_challenge: &Challenge) -> Res<ClientHandshakeData>
 where
     T: BincodeSend + BincodeReceive,
 {
-    let ProtocolMessage::HandshakeChallenge(challenge) = stream.pull().await? else {
+    // Wait for the server's preamble.
+
+    let ProtocolMessage::ServerPreamble(server_preamble) = stream.pull().await? else {
         return Err(Err::msg("Handshake failed: improper message type (expected handshake challenge)"));
     };
 
-    info!("🚧 Handshake challenge received ...");
+    // Validate the server's signature.
 
-    let signature = sign_challenge(&challenge, private_key)?;
-    stream.push(ProtocolMessage::HandshakeChallengeResponse(SerializeableSignature::from(signature))).await?;
+    validate_signed_challenge(client_challenge, &server_preamble.signature.into(), &server_preamble.identity_public_key)?;
+
+    info!("✅ Server's signature validated with public key `{}` ...", server_preamble.identity_public_key);
+
+    // Ensure that the server is in the `known_hosts` file.
+
+    if !config.known_hosts.contains(&server_preamble.identity_public_key) {
+        // Client doesn;t really need to tell the server about failures, so will error and break the pipe.
+        return Err(Err::msg(format!("Server's public key `{}` is not in the known hosts file", server_preamble.identity_public_key)));
+    }
+
+    info!("🚧 Signing server challenge ...");
+
+    let client_signature = sign_challenge(&server_preamble.challenge, &config.private_key)?;
+    let client_authentication = ClientAuthentication {
+        identity_public_key: config.public_key.clone(),
+        signature: client_signature.into(),
+    };
+    stream.push(ProtocolMessage::ClientAuthentication(client_authentication)).await?;
 
     info!("⏳ Awaiting challenge validation ...");
 
-    let ProtocolMessage::HandshakeCompletion(peer_public_key) = stream.pull().await?.fail_if_error()? else {
+    let ProtocolMessage::HandshakeCompletion = stream.pull().await?.fail_if_error()? else {
         return Err(Err::msg("Handshake failed: improper message type (expected handshake completion)"));
     };
 
-    Ok(ClientHandshakeData { challenge, peer_public_key })
+    Ok(ClientHandshakeData {
+        server_challenge: server_preamble.challenge,
+        server_exchange_public_key: server_preamble.exchange_public_key,
+    })
 }
 
 /// Handles the handshake with the server.
-async fn handle_handshake<T>(stream: &mut T, private_key: &SecretString, remote_address: &str, should_encrypt: bool) -> Res<ClientKeyExchangeData>
+async fn handle_handshake<T, R>(stream: &mut T, config: &Config, remote_address: R) -> Res<ClientKeyExchangeData>
 where
     T: BincodeSend + BincodeReceive,
+    R: Into<String>,
 {
     // If we want to request encryption, we need to generate an ephemeral key pair, and send the public key to the server.
-    let local_ephemeral_key_pair = generate_ephemeral_key_pair()?;
-    let local_peer_public_key = if should_encrypt {
-        let pair = local_ephemeral_key_pair
-            .public_key
-            .as_ref()
-            .try_into()
-            .map_err(|_| Err::msg("Could not convert peer public key to array"))?;
+    let exchange_key_pair = generate_ephemeral_key_pair()?;
+    let exchange_public_key = exchange_key_pair.public_key.as_ref().try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?;
 
-        Some(pair)
-    } else {
-        None
-    };
-
-    send_preamble(stream, remote_address, local_peer_public_key).await?;
-    let handshake_data = handle_challenge(stream, private_key).await?;
+    let client_challenge = send_preamble(stream, config, remote_address, exchange_public_key).await?;
+    let handshake_data = handle_challenge(stream, config, &client_challenge).await?;
 
     // Compute the ephemeral data.
 
     let ephemeral_data = ClientKeyExchangeData {
-        local_private_key: local_ephemeral_key_pair.private_key,
-        peer_public_key: handshake_data.peer_public_key,
-        challenge: handshake_data.challenge,
+        server_exchange_public_key: handshake_data.server_exchange_public_key,
+        server_challenge: handshake_data.server_challenge,
+        local_exchange_private_key: exchange_key_pair.private_key,
+        local_challenge: client_challenge,
     };
 
     info!("✅ Challenge accepted!");
@@ -200,19 +225,15 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
         let mut remote = BuffedStream::new(remote_connect_tcp(&config.connect_address).await?);
 
         // Handle the handshake.
-        let client_exchange_data = handle_handshake(&mut remote, &config.private_key, &remote_address, config.should_encrypt)
-            .await
-            .context("Error handling handshake")?;
+        let handshake_data = handle_handshake(&mut remote, &config, &remote_address).await.context("Error handling handshake")?;
 
         info!("✅ Handshake successful: connection established!");
 
         // Generate and apply the shared secret, if needed.
         if config.should_encrypt {
-            let private_key = client_exchange_data.local_private_key;
-            let peer_public_key = client_exchange_data.peer_public_key;
-            let challenge = client_exchange_data.challenge;
+            let salt_bytes = [handshake_data.server_challenge, handshake_data.local_challenge].concat();
 
-            let shared_secret = generate_shared_secret(private_key, &peer_public_key, &challenge)?;
+            let shared_secret = generate_shared_secret(handshake_data.local_exchange_private_key, &handshake_data.server_exchange_public_key, &salt_bytes)?;
 
             remote = remote.with_encryption(shared_secret);
             info!("🔒 Encryption applied ...");
@@ -258,7 +279,7 @@ async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Con
     let mut remote = BuffedStream::new(remote_connect_tcp(&config.connect_address).await?);
 
     // Handle the handshake.
-    if let Err(e) = handle_handshake(&mut remote, &config.private_key, &tunnel_definition.remote_address, config.should_encrypt).await {
+    if let Err(e) = handle_handshake(&mut remote, &config, &tunnel_definition.remote_address).await {
         error!("❌ Test connection failed: {}", e);
         return Err(e);
     }
@@ -274,20 +295,24 @@ async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Con
 ///
 /// This is used to store the private key, the connect address, and whether or not to encrypt the connection.
 #[derive(Clone)]
-struct Config {
-    private_key: SecretString,
-    connect_address: String,
-    should_encrypt: bool,
+pub(crate) struct Config {
+    pub(crate) public_key: String,
+    pub(crate) private_key: SecretString,
+    pub(crate) known_hosts: Vec<String>,
+    pub(crate) connect_address: String,
+    pub(crate) should_encrypt: bool,
 }
 
 impl Config {
     /// Creates a new configuration.
-    fn new(private_key: String, connect_address: String, should_encrypt: bool) -> Self {
-        Self {
-            private_key: private_key.into(),
+    fn new(public_key: String, private_key: SecretString, known_hosts: Vec<String>, connect_address: String, should_encrypt: bool) -> Res<Self> {
+        Ok(Self {
+            public_key,
+            private_key,
             connect_address,
+            known_hosts,
             should_encrypt,
-        }
+        })
     }
 }
 
@@ -295,121 +320,120 @@ impl Config {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::{
-        protocol::ProtocolError,
-        utils::{
-            generate_key_pair,
-            tests::{generate_test_duplex, generate_test_fake_peer_public_key},
-        },
+    use crate::utils::{
+        generate_key_pair,
+        tests::{generate_test_duplex, generate_test_fake_exchange_public_key},
     };
 
     use super::*;
     use pretty_assertions::assert_eq;
-    use secrecy::ExposeSecret;
+
+    pub(crate) fn generate_test_client_config() -> Config {
+        let key_path = "test/client";
+
+        let public_key = resolve_public_key(key_path).unwrap();
+        let private_key = resolve_private_key(key_path).unwrap();
+        let known_hosts = resolve_known_hosts(key_path);
+
+        Config {
+            public_key,
+            private_key,
+            known_hosts,
+            connect_address: "connect_address".to_string(),
+            should_encrypt: false,
+        }
+    }
 
     #[test]
-    fn test_prepare_globals() {
-        let key = "key";
+    fn test_prepare() {
+        let key_path = "test/client";
         let connect_address = "connect_address";
-        let tunnel_definitions = ["a:b:c:d"];
+        let tunnel_definitions = ["localhost:5000:example.com:80", "127.0.0.1:6000:api.example.com:443"];
+        let should_encrypt = false;
 
-        let instance = Instance::prepare(key, connect_address, &tunnel_definitions, false).unwrap();
+        let instance = Instance::prepare(key_path.to_owned(), connect_address, &tunnel_definitions, should_encrypt).unwrap();
 
-        assert_eq!(instance.config.private_key.expose_secret(), key);
-        assert_eq!(instance.config.connect_address, "connect_address");
-        assert_eq!(instance.config.should_encrypt, false);
+        // Verify config
+        assert_eq!(instance.config.connect_address, connect_address);
+        assert_eq!(instance.config.should_encrypt, should_encrypt);
 
-        assert_eq!(instance.tunnel_definitions[0].bind_address, "a:b");
-        assert_eq!(instance.tunnel_definitions[0].remote_address, "c:d");
+        // Verify the public key was loaded correctly
+        let expected_public_key = resolve_public_key(key_path).unwrap();
+        assert_eq!(instance.config.public_key, expected_public_key);
+
+        // Verify known hosts were loaded correctly
+        let expected_known_hosts = resolve_known_hosts(key_path);
+        assert_eq!(instance.config.known_hosts, expected_known_hosts);
+
+        // Verify tunnel definitions
+        assert_eq!(instance.tunnel_definitions.len(), 2);
+        assert_eq!(instance.tunnel_definitions[0].bind_address, "localhost:5000");
+        assert_eq!(instance.tunnel_definitions[0].remote_address, "example.com:80");
+        assert_eq!(instance.tunnel_definitions[1].bind_address, "127.0.0.1:6000");
+        assert_eq!(instance.tunnel_definitions[1].remote_address, "api.example.com:443");
     }
 
     #[tokio::test]
     async fn test_send_preamble() {
         let (mut client, mut server) = generate_test_duplex();
-        let local_peer_public_key = Some(generate_test_fake_peer_public_key());
-
+        let config = generate_test_client_config();
         let remote_address = "remote_address:3000";
+        let exchange_public_key = generate_test_fake_exchange_public_key();
 
-        send_preamble(&mut client, remote_address, local_peer_public_key).await.unwrap();
+        let client_challenge = send_preamble(&mut client, &config, remote_address, exchange_public_key).await.unwrap();
+
         let received = server.pull().await.unwrap();
 
-        assert_eq!(
-            received,
-            ProtocolMessage::HandshakeStart(Preamble {
-                remote: remote_address.to_string(),
-                peer_public_key: local_peer_public_key,
-            })
-        );
+        match received {
+            ProtocolMessage::ClientPreamble(preamble) => {
+                assert_eq!(preamble.remote, remote_address);
+                assert_eq!(preamble.exchange_public_key, exchange_public_key);
+                assert_eq!(preamble.challenge, client_challenge);
+                assert_eq!(preamble.should_encrypt, config.should_encrypt);
+            }
+            _ => panic!("Expected ClientPreamble, got different message type"),
+        }
     }
 
     #[tokio::test]
-    async fn test_handle_handshake_response() {
+    async fn test_handle_challenge_bad_key() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key.into();
-        let peer_public_key = b"this is a peer public key with s";
+        let config = generate_test_client_config();
+        let client_challenge = generate_challenge();
+        let bad_key = generate_key_pair().unwrap().private_key;
 
-        // Have the server send a challenge.
-        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
-        let handshake_response_message = ProtocolMessage::HandshakeCompletion(peer_public_key.to_owned());
-        server.push(challenge_message).await.unwrap();
-        server.push(handshake_response_message).await.unwrap();
+        tokio::spawn(async move {
+            // Create and send ServerPreamble with unknown key
+            let preamble = crate::protocol::ServerPreamble {
+                identity_public_key: bad_key,
+                signature: [0u8; 64].into(), // Mock signature
+                challenge: generate_challenge(),
+                exchange_public_key: generate_test_fake_exchange_public_key(),
+            };
 
-        let result = handle_handshake(&mut client, &key, "remote_address", false).await.unwrap();
+            server.push(ProtocolMessage::ServerPreamble(preamble)).await.unwrap();
+        });
 
-        assert_eq!(result.peer_public_key, *peer_public_key);
-    }
-
-    #[tokio::test]
-    async fn test_handle_failed_key_handshake_response() {
-        let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key.into();
-        let error_message = "error_message";
-
-        // Have the server send a challenge.
-        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
-        let handshake_response_message = ProtocolMessage::Error(ProtocolError::InvalidKey(error_message.to_string()));
-        server.push(challenge_message).await.unwrap();
-        server.push(handshake_response_message).await.unwrap();
-
-        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
+        let result = handle_challenge(&mut client, &config, &client_challenge).await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().to_string(), format!("Invalid key: {}", error_message));
+        assert_eq!(result.unwrap_err().to_string(), "Invalid signature");
     }
 
     #[tokio::test]
-    async fn test_handle_failed_host_handshake_response() {
+    async fn test_handle_challenge_wrong_message_type() {
         let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key.into();
-        let error_message = "error_message";
+        let config = generate_test_client_config();
+        let client_challenge = generate_challenge();
 
-        // Have the server send a challenge.
-        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
-        let handshake_response_message = ProtocolMessage::Error(ProtocolError::InvalidHost(error_message.to_string()));
-        server.push(challenge_message).await.unwrap();
-        server.push(handshake_response_message).await.unwrap();
+        tokio::spawn(async move {
+            // Send wrong message type
+            server.push(ProtocolMessage::HandshakeCompletion).await.unwrap();
+        });
 
-        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
+        let result = handle_challenge(&mut client, &config, &client_challenge).await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().to_string(), format!("Invalid host: {}", error_message));
-    }
-
-    #[tokio::test]
-    async fn test_handle_failed_unknown_handshake_response() {
-        let (mut client, mut server) = generate_test_duplex();
-        let key = generate_key_pair().unwrap().private_key.into();
-        let error_message = "error_message";
-
-        // Have the server send a challenge.
-        let challenge_message = ProtocolMessage::HandshakeChallenge(b"this is a challenge and it needs".to_owned());
-        let handshake_response_message = ProtocolMessage::Error(ProtocolError::Unknown(error_message.to_string()));
-        server.push(challenge_message).await.unwrap();
-        server.push(handshake_response_message).await.unwrap();
-
-        let result = handle_handshake(&mut client, &key, "remote_address", false).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.err().unwrap().to_string(), format!("Unknown: {}", error_message));
+        assert!(result.unwrap_err().to_string().contains("improper message type"));
     }
 }

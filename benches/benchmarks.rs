@@ -1,10 +1,14 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use futures::future::join_all;
-use ratrodlib::{base::{Constant, EphemeralKeyPair, SharedSecret}, buffed_stream::BuffedStream, utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret}};
+use ratrodlib::{
+    base::{Constant, ExchangeKeyPair, SharedSecret},
+    buffed_stream::BuffedStream,
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret},
+};
 use secrecy::ExposeSecret;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub fn generate_test_ephemeral_key_pair() -> EphemeralKeyPair {
+pub fn generate_test_ephemeral_key_pair() -> ExchangeKeyPair {
     generate_ephemeral_key_pair().unwrap()
 }
 
@@ -16,15 +20,16 @@ pub fn generate_test_shared_secret() -> SharedSecret {
 }
 
 async fn large_data_bench(encrypted: bool) {
-    
     let (client, server) = tokio::io::duplex(Constant::BUFFER_SIZE);
 
     let (mut client, mut server) = if encrypted {
         let secret_box = generate_test_shared_secret();
         let shared_secret = secret_box.expose_secret();
 
-
-        (BuffedStream::new(client).with_encryption(SharedSecret::init_with(|| *shared_secret)), BuffedStream::new(server).with_encryption(SharedSecret::init_with(|| *shared_secret)))
+        (
+            BuffedStream::new(client).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedStream::new(server).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+        )
     } else {
         (BuffedStream::new(client), BuffedStream::new(server))
     };
@@ -49,12 +54,16 @@ async fn large_data_bench(encrypted: bool) {
 }
 
 fn bench(c: &mut Criterion) {
-    c.bench_function("bench large data", |b| b.iter(async || {
-        large_data_bench(false).await;
-    }));
-    c.bench_function("bench encrypted large data", |b| b.iter(async || {
-        large_data_bench(true).await;
-    }));
+    c.bench_function("bench large data", |b| {
+        b.iter(async || {
+            large_data_bench(false).await;
+        })
+    });
+    c.bench_function("bench encrypted large data", |b| {
+        b.iter(async || {
+            large_data_bench(true).await;
+        })
+    });
 }
 
 criterion_group!(benches, bench);

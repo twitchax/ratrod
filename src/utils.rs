@@ -18,8 +18,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
 use crate::{
-    base::{Base64KeyPair, Constant, EncryptedData, EphemeralKeyPair, Err, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void},
-    protocol::{Challenge, PeerPublicKey, Signature},
+    base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void},
+    protocol::{Challenge, ExchangePublicKey, Signature},
 };
 
 pub fn random_string(len: usize) -> String {
@@ -75,26 +75,36 @@ pub fn sign_challenge(challenge: &Challenge, private_key: &SecretString) -> Res<
     Ok(signature)
 }
 
-pub fn generate_ephemeral_key_pair() -> Res<EphemeralKeyPair> {
+pub fn validate_signed_challenge(challenge: &Challenge, signature: &Signature, public_key: &str) -> Void {
+    let public_key = Constant::BASE64_ENGINE.decode(public_key).context("Could not decode public key")?;
+
+    let unparsed_public_key = ring::signature::UnparsedPublicKey::new(Constant::SIGNATURE, public_key);
+
+    unparsed_public_key.verify(challenge, signature).context("Invalid signature")?;
+
+    Ok(())
+}
+
+pub fn generate_ephemeral_key_pair() -> Res<ExchangeKeyPair> {
     let rng = SystemRandom::new();
 
     let my_private_key = EphemeralPrivateKey::generate(Constant::AGREEMENT, &rng)?;
 
     let public_key = my_private_key.compute_public_key()?;
 
-    Ok(EphemeralKeyPair { public_key, private_key: my_private_key })
+    Ok(ExchangeKeyPair { public_key, private_key: my_private_key })
 }
 
-pub fn generate_shared_secret(private_key: EphemeralPrivateKey, peer_public_key: &PeerPublicKey, challenge: &Challenge) -> Res<SharedSecret> {
+pub fn generate_shared_secret(private_key: EphemeralPrivateKey, peer_public_key: &ExchangePublicKey, salt_bytes: &[u8]) -> Res<SharedSecret> {
     let unparsed_peer_public_key = ring::agreement::UnparsedPublicKey::new(Constant::AGREEMENT, peer_public_key);
-    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| generate_chacha_key(shared_secret, challenge))??;
+    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| generate_chacha_key(shared_secret, salt_bytes))??;
 
     Ok(shared_secret)
 }
 
-fn generate_chacha_key(private_key: &[u8], challenge: &[u8]) -> Res<SharedSecret> {
-    let salt = Salt::new(Constant::KDF, challenge);
-    let info = &[challenge];
+fn generate_chacha_key(private_key: &[u8], salt_bytes: &[u8]) -> Res<SharedSecret> {
+    let salt = Salt::new(Constant::KDF, salt_bytes);
+    let info = &[salt_bytes];
 
     let prk = salt.extract(private_key);
     let okm = prk.expand(info, Constant::KDF)?;
@@ -133,16 +143,6 @@ pub fn decrypt(shared_secret: &SharedSecret, ciphertext: &[u8], nonce_bytes: &Sh
     let plaintext = opening_key.open_in_place(nonce, Aad::empty(), &mut in_out).context("Could not open in place for decryption")?;
 
     Ok(plaintext.to_vec())
-}
-
-pub fn validate_signed_challenge(challenge: &Challenge, signature: &Signature, public_key: &str) -> Void {
-    let public_key = Constant::BASE64_ENGINE.decode(public_key).context("Could not decode public key")?;
-
-    let unparsed_public_key = ring::signature::UnparsedPublicKey::new(Constant::SIGNATURE, public_key);
-
-    unparsed_public_key.verify(challenge, signature).context("Invalid signature")?;
-
-    Ok(())
 }
 
 /// Parses the tunnel definition from the given input string.
@@ -233,10 +233,13 @@ pub mod tests {
         let secret_box = generate_test_shared_secret();
         let shared_secret = secret_box.expose_secret();
 
-        (BuffedStream::new(a).with_encryption(SharedSecret::init_with(|| *shared_secret)), BuffedStream::new(b).with_encryption(SharedSecret::init_with(|| *shared_secret)))
+        (
+            BuffedStream::new(a).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedStream::new(b).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+        )
     }
 
-    pub fn generate_test_ephemeral_key_pair() -> EphemeralKeyPair {
+    pub fn generate_test_ephemeral_key_pair() -> ExchangeKeyPair {
         generate_ephemeral_key_pair().unwrap()
     }
 
@@ -247,7 +250,7 @@ pub mod tests {
         generate_shared_secret(ephemeral_key_pair.private_key, ephemeral_key_pair.public_key.as_ref().try_into().unwrap(), &challenge).unwrap()
     }
 
-    pub fn generate_test_fake_peer_public_key() -> PeerPublicKey {
+    pub fn generate_test_fake_exchange_public_key() -> ExchangePublicKey {
         b"this needs to be exactly 32 byte".as_ref().try_into().unwrap()
     }
 

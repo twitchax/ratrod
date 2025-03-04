@@ -20,13 +20,32 @@ pub type Challenge = [u8; Constant::CHALLENGE_SIZE];
 pub type Signature = [u8; Constant::SIGNATURE_SIZE];
 
 /// A helper type for an ephemeral public key.
-pub type PeerPublicKey = [u8; Constant::PEER_PUBLIC_KEY_SIZE];
+pub type ExchangePublicKey = [u8; Constant::PEER_PUBLIC_KEY_SIZE];
 
 /// Serves as the preamble for the connection.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Preamble {
+pub struct ClientPreamble {
+    pub exchange_public_key: ExchangePublicKey,
     pub remote: String,
-    pub peer_public_key: Option<PeerPublicKey>,
+    pub challenge: Challenge,
+    pub should_encrypt: bool,
+}
+
+/// Serves as the server's response to the preamble, containing its
+/// public key, its signature of the client's challenge and a challenge.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerPreamble {
+    pub identity_public_key: String,
+    pub exchange_public_key: ExchangePublicKey,
+    pub signature: SerializeableSignature,
+    pub challenge: Challenge,
+}
+
+/// Serves as the client's response to the server's challenge.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientAuthentication {
+    pub identity_public_key: String,
+    pub signature: SerializeableSignature,
 }
 
 // Message types.
@@ -40,10 +59,10 @@ pub trait BincodeMessage: Serialize + DeserializeOwned {}
 /// It is also used to serialize and deserialize messages.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProtocolMessage {
-    HandshakeStart(Preamble),
-    HandshakeChallenge(Challenge),
-    HandshakeChallengeResponse(SerializeableSignature),
-    HandshakeCompletion(PeerPublicKey),
+    ClientPreamble(ClientPreamble),
+    ServerPreamble(ServerPreamble),
+    ClientAuthentication(ClientAuthentication),
+    HandshakeCompletion,
     PlaintextPacket(Vec<u8>),
     EncryptedPacket { nonce: [u8; Constant::SHARED_SECRET_NONCE_SIZE], data: Vec<u8> },
     Error(ProtocolError),
@@ -139,12 +158,18 @@ impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolM
 // Signature serialization.
 
 /// A helper type for serializing signatures (bincode cannot serialize a `[u8; 64]` our of the box).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerializeableSignature(pub Signature);
 
 impl From<Signature> for SerializeableSignature {
     fn from(signature: Signature) -> Self {
         Self(signature)
+    }
+}
+
+impl From<&Signature> for SerializeableSignature {
+    fn from(signature: &Signature) -> Self {
+        Self(*signature)
     }
 }
 
@@ -185,7 +210,7 @@ impl<'de> Deserialize<'de> for SerializeableSignature {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::tests::{generate_test_duplex, generate_test_fake_peer_public_key};
+    use crate::utils::tests::{generate_test_duplex, generate_test_fake_exchange_public_key};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -194,14 +219,16 @@ mod tests {
     async fn test_bincode() {
         let (mut client, mut server) = generate_test_duplex();
 
-        let data = Preamble {
+        let data = ClientPreamble {
+            exchange_public_key: generate_test_fake_exchange_public_key(),
             remote: "remote".to_string(),
-            peer_public_key: Some(generate_test_fake_peer_public_key()),
+            challenge: Challenge::default(),
+            should_encrypt: true,
         };
 
-        client.push(ProtocolMessage::HandshakeStart(data.clone())).await.unwrap();
+        client.push(ProtocolMessage::ClientPreamble(data.clone())).await.unwrap();
 
-        let ProtocolMessage::HandshakeStart(message) = server.pull().await.unwrap() else {
+        let ProtocolMessage::ClientPreamble(message) = server.pull().await.unwrap() else {
             panic!("Failed to receive message");
         };
 

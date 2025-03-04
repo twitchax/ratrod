@@ -10,7 +10,7 @@ use ring::{
 };
 use secrecy::SecretBox;
 
-use crate::protocol::{Challenge, PeerPublicKey, Preamble};
+use crate::protocol::{Challenge, ExchangePublicKey};
 
 /// A helper type for errors.
 pub type Err = anyhow::Error;
@@ -32,7 +32,7 @@ impl Constant {
     pub const DELIMITER_SIZE: usize = 8;
     pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
-    pub const NULL_PEER_PUBLIC_KEY: PeerPublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
+    pub const NULL_PEER_PUBLIC_KEY: ExchangePublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
     pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
     pub const PRIVATE_KEY_SIZE: usize = 83;
     pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
@@ -81,7 +81,7 @@ pub struct Base64KeyPair {
 ///
 /// This is used to derive a shared secret, which is used to encrypt and decrypt data.
 /// This is used during the handshake phase.
-pub struct EphemeralKeyPair {
+pub struct ExchangeKeyPair {
     pub public_key: PublicKey,
     pub private_key: EphemeralPrivateKey,
 }
@@ -91,26 +91,33 @@ pub struct EphemeralKeyPair {
 /// This is used to derive a shared secret, which is used to encrypt and decrypt data.
 /// Essentially, it holds the instances _local_ public/private key pair, and the _remote_ peer public key.
 /// The _local_ private key, couples with the _peer_ public key and challenge is used to derive the shared secret.
+#[derive(Debug)]
 pub struct ClientKeyExchangeData {
-    pub local_private_key: EphemeralPrivateKey,
-    pub peer_public_key: PeerPublicKey,
-    pub challenge: Challenge,
+    pub server_exchange_public_key: ExchangePublicKey,
+    pub server_challenge: Challenge,
+    pub local_exchange_private_key: EphemeralPrivateKey,
+    pub local_challenge: Challenge,
 }
 
 /// A wrapper for the Preamble, and the EphemeralKeyPair.
 ///
 /// This is mostly used as a convenience type, to hold the preamble and the ephemeral key pair together.
-pub struct ServerHandshakeData {
-    pub preamble: Preamble,
-    pub local_ephemeral_key_pair: EphemeralKeyPair,
+pub struct ServerKeyExchangeData {
+    pub client_exchange_public_key: ExchangePublicKey,
+    pub client_challenge: Challenge,
+    pub local_exchange_private_key: EphemeralPrivateKey,
+    pub local_challenge: Challenge,
+    pub requested_remote_address: String,
+    pub requested_should_encrypt: bool,
 }
 
 /// A wrapper for the Challenge, and the PeerPublicKey.
 ///
 /// This is mostly used as a convenience type, to hold the challenge and the peer public key together.
+#[derive(Clone, Debug)]
 pub struct ClientHandshakeData {
-    pub challenge: Challenge,
-    pub peer_public_key: PeerPublicKey,
+    pub server_challenge: Challenge,
+    pub server_exchange_public_key: ExchangePublicKey,
 }
 
 /// A wrapper for encrypted data, and its nonce.

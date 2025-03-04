@@ -6,12 +6,13 @@
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
 
-use ratrodlib::base::{Err, Void};
 use clap::{Parser, Subcommand};
-use ratrodlib::keypair::{generate, resolve_private_key, resolve_public_key};
+use ratrodlib::security::generate;
+use ratrodlib::{
+    base::{Err, Void},
+    security::resolve_keypath,
+};
 use tracing::error;
-
-
 
 #[coverage(off)]
 #[tokio::main]
@@ -40,16 +41,15 @@ async fn main() {
 
 async fn execute_command(command: Option<Command>) -> Void {
     match command {
-        Some(Command::Serve { bind, key, remote_regex }) => {
-            let public_key = resolve_public_key(key)?;
-            ratrodlib::serve::Instance::prepare(public_key, remote_regex, bind)?.start().await?;
+        Some(Command::Serve { bind, key_path, remote_regex }) => {
+            ratrodlib::serve::Instance::prepare(key_path, remote_regex, bind)?.start().await?;
         }
-        Some(Command::Connect { server, tunnel, key, encrypt }) => {
-            let private_key = resolve_private_key(key)?;
-            ratrodlib::connect::Instance::prepare(private_key, server, &tunnel, encrypt)?.start().await?;
+        Some(Command::Connect { server, tunnel, key_path, encrypt }) => {
+            ratrodlib::connect::Instance::prepare(key_path, server, &tunnel, encrypt)?.start().await?;
         }
-        Some(Command::GenerateKeypair { print, location, filename }) => {
-            generate(print, location, filename)?;
+        Some(Command::GenerateKeypair { output, path }) => {
+            let key_path = resolve_keypath(path)?;
+            generate(output, key_path)?;
         }
         None => {
             return Err(Err::msg("No command specified."));
@@ -89,13 +89,11 @@ enum Command {
         /// machines on a specific interface.
         bind: String,
 
-        /// Specifies a public key to use for authentication from connecting clients.  This can be either
-        /// a base64-encoded keyfile, or a base64-encoded key.
+        /// Specifies the path to the key store (`key`, `key.pub`, `authorized_keys`).
         ///
-        /// The key is checked at connection time.
-        /// The key is not used for encryption.  The default value is read from `$HOME/.ratrod/key`.
+        /// The default value is read from `$HOME/.ratrod`.
         #[arg(short, long)]
-        key: Option<String>,
+        key_path: Option<String>,
 
         /// Specifies an optional regex restriction on the remote hostnames that can be connected to.
         /// This is used to prevent clients from connecting to arbitrary through the server.
@@ -142,7 +140,7 @@ enum Command {
         /// The key is checked at connection time.
         /// The key is not used for encryption.  The default value is read from `$HOME/.ratrod/key`.
         #[arg(short, long)]
-        key: Option<String>,
+        key_path: Option<String>,
 
         /// Specifies whether to encrypt the traffic between the client and server.
         ///
@@ -159,26 +157,17 @@ enum Command {
     GenerateKeypair {
         /// Specifies that the keypair should be printed to stdout.
         #[arg(short, long)]
-        print: bool,
+        output: bool,
 
         /// Specifies the location to write the keypair to (the default is `$HOME/.ratrod`).
         #[arg(short, long)]
-        location: Option<String>,
-
-        /// Indicates the filename to write the keypair to (the default is `key`).
-        #[arg(short, long, default_value = "key")]
-        filename: Option<String>,
+        path: Option<String>,
     },
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
-    use ratrodlib::{
-        base::Base64KeyPair,
-        utils::generate_key_pair,
-    };
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -204,7 +193,7 @@ mod tests {
         }
     }
 
-    async fn bootstrap_e2e(public_key: String, private_key: String, remote_regex: String, port: u16, should_encrypt: bool) -> [String; 2] {
+    async fn bootstrap_e2e(server_key_path: String, client_key_path: String, remote_regex: String, port: u16, should_encrypt: bool) -> [String; 2] {
         let remote_address = format!("127.0.0.1:{}", port);
         let server_address = format!("127.0.0.1:{}", port + 1);
         let client_tunnels = [format!("{}:{}", port + 2, port), format!("{}:{}", port + 3, port)];
@@ -214,10 +203,10 @@ mod tests {
         tokio::spawn(EchoServer::start(remote_address));
 
         // Start a "server".
-        tokio::spawn(ratrodlib::serve::Instance::prepare(public_key, remote_regex, server_address.clone()).unwrap().start());
+        tokio::spawn(ratrodlib::serve::Instance::prepare(server_key_path, remote_regex, server_address.clone()).unwrap().start());
 
         // Start a "client".
-        tokio::spawn(ratrodlib::connect::Instance::prepare(private_key, server_address, &client_tunnels, should_encrypt).unwrap().start());
+        tokio::spawn(ratrodlib::connect::Instance::prepare(client_key_path, server_address, &client_tunnels, should_encrypt).unwrap().start());
 
         // Do a "healthcheck" to ensure that the server is up and running.
 
@@ -230,25 +219,25 @@ mod tests {
 
     #[test]
     fn test_args() {
-        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key", "key", "--remote-regex", ".*"]);
+        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key-path", "key", "--remote-regex", ".*"]);
 
         assert_eq!(
             args.command,
             Some(Command::Serve {
                 bind: "127.0.0.1:3000".to_string(),
-                key: Some("key".to_string()),
+                key_path: Some("key".to_string()),
                 remote_regex: ".*".to_string(),
             })
         );
 
-        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key", "key", "-e"]);
+        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key-path", "key", "-e"]);
 
         assert_eq!(
             args.command,
             Some(Command::Connect {
                 server: "127.0.0.1:3000".to_string(),
                 tunnel: vec!["3000:127.0.0.1:3000".to_string(), "4000".to_string()],
-                key: Some("key".to_string()),
+                key_path: Some("key".to_string()),
                 encrypt: true
             })
         );
@@ -259,8 +248,7 @@ mod tests {
         let remote_regex = ".*".to_string();
         let port = 3000;
 
-        let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/client".to_owned(), remote_regex, port, false).await;
 
         // Open a client connection.
 
@@ -286,8 +274,7 @@ mod tests {
         let remote_regex = ".*".to_string();
         let port = 3100;
 
-        let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, true).await;
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/client".to_owned(), remote_regex, port, true).await;
 
         // Open a client connection.
 
@@ -309,13 +296,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_e2e_bad_key() {
+    async fn test_e2e_bad_client_key() {
         let remote_regex = ".*".to_string();
         let port = 3200;
 
-        let Base64KeyPair { public_key, .. } = generate_key_pair().unwrap();
-        let Base64KeyPair { private_key, .. } = generate_key_pair().unwrap();
-        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/bad".to_owned(), remote_regex, port, false).await;
 
         // Open a client connection.
 
@@ -332,6 +317,32 @@ mod tests {
 
         // intermediary disconnected because the key is bad.
         assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Connection reset by peer (os error 104)");
+    }
+
+    #[tokio::test]
+    async fn test_e2e_bad_server_key() {
+        let remote_regex = ".*".to_string();
+        let port = 3300;
+
+        let client_addresses = bootstrap_e2e("./test/bad".to_owned(), "./test/client".to_owned(), remote_regex, port, false).await;
+
+        // Open a client connection.
+
+        let mut client = TcpStream::connect(&client_addresses[0]).await.unwrap();
+
+        // Send a message to the server.
+        let message = b"Hello, world!";
+        client.write_all(message).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        let result = client.read_exact(&mut buffer).await;
+
+        // intermediary disconnected because the key is bad.
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Connection reset by peer (os error 104)");
     }
 
     #[tokio::test]
@@ -339,8 +350,7 @@ mod tests {
         let remote_regex = "not_127.0.0.1".to_string();
         let port = 3300;
 
-        let Base64KeyPair { public_key, private_key } = generate_key_pair().unwrap();
-        let client_addresses = bootstrap_e2e(public_key, private_key, remote_regex, port, false).await;
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/client".to_owned(), remote_regex, port, false).await;
 
         // Open a client connection.
 
@@ -357,5 +367,6 @@ mod tests {
 
         // intermediary disconnected because the host is bad.
         assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Connection reset by peer (os error 104)");
     }
 }

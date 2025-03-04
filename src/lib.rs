@@ -11,7 +11,7 @@ pub use tokio;
 pub mod base;
 pub mod buffed_stream;
 pub mod connect;
-pub mod keypair;
 pub mod protocol;
+pub mod security;
 pub mod serve;
 pub mod utils;
