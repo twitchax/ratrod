@@ -18,7 +18,6 @@ pub type Err = anyhow::Error;
 pub type Res<T> = anyhow::Result<T, Err>;
 /// A helper type for void results.
 pub type Void = Res<()>;
-
 /// A struct for constants.
 pub struct Constant;
 
@@ -34,7 +33,8 @@ impl Constant {
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
     pub const NULL_PEER_PUBLIC_KEY: ExchangePublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
     pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
-    pub const PRIVATE_KEY_SIZE: usize = 83;
+    pub const IDENTITY_PRIVATE_KEY_LENGTH: usize = 111;
+    pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 43;
     pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
     pub const SHARED_SECRET_SIZE: usize = 32;
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
