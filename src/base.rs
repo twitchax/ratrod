@@ -30,11 +30,11 @@ impl Constant {
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
     pub const DELIMITER_SIZE: usize = 8;
     pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
+    pub const IDENTITY_PRIVATE_KEY_LENGTH: usize = 111;
+    pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 43;
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
     pub const NULL_PEER_PUBLIC_KEY: ExchangePublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
     pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
-    pub const IDENTITY_PRIVATE_KEY_LENGTH: usize = 111;
-    pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 43;
     pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
     pub const SHARED_SECRET_SIZE: usize = 32;
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
@@ -109,6 +109,7 @@ pub struct ServerKeyExchangeData {
     pub local_challenge: Challenge,
     pub requested_remote_address: String,
     pub requested_should_encrypt: bool,
+    pub requested_is_udp: bool,
 }
 
 /// A wrapper for the Challenge, and the PeerPublicKey.

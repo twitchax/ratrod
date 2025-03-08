@@ -2,16 +2,24 @@
 //!
 //! It includes the state machine, operations, and configuration.
 
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
+use futures::join;
 use secrecy::SecretString;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::{
+        Mutex,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+    },
+    task::JoinHandle,
+};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{ClientHandshakeData, ClientKeyExchangeData, Err, Res, TunnelDefinition, Void},
-    buffed_stream::BuffedStream,
+    base::{ClientHandshakeData, ClientKeyExchangeData, Constant, Err, Res, TunnelDefinition, Void},
+    buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ExchangePublicKey, ProtocolMessage},
     security::{resolve_keypath, resolve_known_hosts, resolve_private_key, resolve_public_key},
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
@@ -68,12 +76,13 @@ impl Instance<ReadyState> {
         let tasks = self
             .tunnel_definitions
             .into_iter()
-            .map(|tunnel_definition| {
+            .map(|tunnel_definition| async {
                 // Schedule a test connection.
                 tokio::spawn(test_server_connection(tunnel_definition.clone(), self.config.clone()));
 
-                // Start the server.
-                tokio::spawn(run_tcp_server(tunnel_definition, self.config.clone()))
+                // Start the servers.
+                tokio::spawn(run_tcp_server(tunnel_definition.clone(), self.config.clone()));
+                tokio::spawn(run_udp_server(tunnel_definition, self.config.clone()));
             })
             .collect::<Vec<_>>();
 
@@ -91,7 +100,7 @@ impl Instance<ReadyState> {
 ///
 /// This is the first message sent to the server. It contains the remote address and the peer public key
 /// for the future key exchange.
-async fn send_preamble<T, R>(stream: &mut T, config: &Config, remote_address: R, exchange_public_key: ExchangePublicKey) -> Res<Challenge>
+async fn send_preamble<T, R>(stream: &mut T, config: &Config, remote_address: R, exchange_public_key: ExchangePublicKey, is_udp: bool) -> Res<Challenge>
 where
     T: BincodeSend,
     R: Into<String>,
@@ -103,6 +112,7 @@ where
         remote: remote_address.into(),
         challenge,
         should_encrypt: config.should_encrypt,
+        is_udp,
     };
 
     stream.push(ProtocolMessage::ClientPreamble(preamble)).await?;
@@ -161,7 +171,7 @@ where
 }
 
 /// Handles the handshake with the server.
-async fn handle_handshake<T, R>(stream: &mut T, config: &Config, remote_address: R) -> Res<ClientKeyExchangeData>
+async fn handle_handshake<T, R>(stream: &mut T, config: &Config, remote_address: R, is_udp: bool) -> Res<ClientKeyExchangeData>
 where
     T: BincodeSend + BincodeReceive,
     R: Into<String>,
@@ -170,7 +180,7 @@ where
     let exchange_key_pair = generate_ephemeral_key_pair()?;
     let exchange_public_key = exchange_key_pair.public_key.as_ref().try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?;
 
-    let client_challenge = send_preamble(stream, config, remote_address, exchange_public_key).await?;
+    let client_challenge = send_preamble(stream, config, remote_address, exchange_public_key, is_udp).await?;
     let handshake_data = handle_challenge(stream, config, &client_challenge).await?;
 
     // Compute the ephemeral data.
@@ -187,6 +197,39 @@ where
     Ok(ephemeral_data)
 }
 
+/// Connects to the requested remote.
+async fn server_connect(connect_address: &str) -> Res<TcpStream> {
+    let stream = TcpStream::connect(connect_address).await?;
+    info!("✅ Connected to server `{}` ...", connect_address);
+
+    Ok(stream)
+}
+
+/// Establishes the e2e connection with server.
+async fn connect(config: &Config, remote_address: &str, is_udp: bool) -> Res<BuffedTcpStream> {
+    // Connect to the server.
+    let mut server = BuffedTcpStream::from(server_connect(&config.connect_address).await?);
+
+    // Handle the handshake.
+    let handshake_data = handle_handshake(&mut server, config, remote_address, is_udp).await.context("Error handling handshake")?;
+
+    info!("✅ Handshake successful: connection established!");
+
+    // Generate and apply the shared secret, if needed.
+    if config.should_encrypt {
+        let salt_bytes = [handshake_data.server_challenge, handshake_data.local_challenge].concat();
+
+        let shared_secret = generate_shared_secret(handshake_data.local_exchange_private_key, &handshake_data.server_exchange_public_key, &salt_bytes)?;
+
+        server = server.with_encryption(shared_secret);
+        info!("🔒 Encryption applied ...");
+    }
+
+    Ok(server)
+}
+
+// TCP connection.
+
 /// Runs the TCP server.
 ///
 /// This is the main entry point for the server. It is used to accept connections and handle them.
@@ -195,12 +238,11 @@ async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
         let listener = TcpListener::bind(&tunnel_definition.bind_address).await?;
 
         info!(
-            "📻 Listening on `{}`, and routing through `{}` to `{}` ...",
+            "📻 [TCP] Listening on `{}`, and routing through `{}` to `{}` ...",
             tunnel_definition.bind_address, config.connect_address, tunnel_definition.remote_address
         );
 
         loop {
-            // TODO: Don't "accept" until the handshake is complete with the server?
             let (socket, _) = listener.accept().await?;
 
             tokio::spawn(handle_tcp(socket, tunnel_definition.remote_address.clone(), config.clone()));
@@ -218,32 +260,18 @@ async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
 /// This is the main entry point for the connection. It is used to handle the handshake and pump data between the client and server.
 async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config) {
     let id = random_string(6);
-    let span = info_span!("conn", id = id);
+    let span = info_span!("tcp", id = id);
 
     let result: Void = async move {
-        // Connect to the server.
-        let mut remote = BuffedStream::new(remote_connect_tcp(&config.connect_address).await?);
+        // Connect.
 
-        // Handle the handshake.
-        let handshake_data = handle_handshake(&mut remote, &config, &remote_address).await.context("Error handling handshake")?;
-
-        info!("✅ Handshake successful: connection established!");
-
-        // Generate and apply the shared secret, if needed.
-        if config.should_encrypt {
-            let salt_bytes = [handshake_data.server_challenge, handshake_data.local_challenge].concat();
-
-            let shared_secret = generate_shared_secret(handshake_data.local_exchange_private_key, &handshake_data.server_exchange_public_key, &salt_bytes)?;
-
-            remote = remote.with_encryption(shared_secret);
-            info!("🔒 Encryption applied ...");
-        }
+        let mut server = connect(&config, &remote_address, false).await?;
 
         // Handle the TCP pump.
 
         info!("⛽ Pumping data between client and remote ...");
 
-        handle_pump(&mut local, &mut remote).await.context("Error handling pump")?;
+        handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
 
         info!("✅ Connection closed.");
 
@@ -263,23 +291,132 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
     }
 }
 
-/// Connects to the requested remote.
-async fn remote_connect_tcp(connext_address: &str) -> Res<TcpStream> {
-    let stream = TcpStream::connect(connext_address).await?;
-    info!("✅ Connected to server `{}` ...", connext_address);
+// UDP connection.
 
-    Ok(stream)
+/// Runs the UDP server.
+///
+/// This is the main entry point for the server. It is used to accept connections and handle them.
+async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
+    let result: Void = async move {
+        let socket = Arc::new(UdpSocket::bind(&tunnel_definition.bind_address).await?);
+
+        info!(
+            "📻 [UDP] Listening on `{}`, and routing through `{}` to `{}` ...",
+            tunnel_definition.bind_address, config.connect_address, tunnel_definition.remote_address
+        );
+
+        let clients = Arc::new(Mutex::new(HashMap::<SocketAddr, UnboundedSender<Vec<u8>>>::new()));
+
+        loop {
+            // Receive a datagram.
+
+            // TODO: _technically_, this could be up to 65,507 bytes, but that would be a bit silly, so 8 KB should be fine (since most systems use the MTU of 1500).
+            let mut buf = vec![0; Constant::BUFFER_SIZE];
+            let (read, addr) = socket.recv_from(&mut buf).await?;
+            buf.truncate(read);
+
+            // Handle the packet.
+
+            if let Some(data_sender) = clients.lock().await.get_mut(&addr) {
+                // In the case where we already have a connection, we should push the message into the channel.
+                data_sender.send(buf)?;
+            } else {
+                // In this case, we need to create a new connection.
+                let socket_clone = socket.clone();
+                let config_clone = config.clone();
+
+                // Create a new channel for the client.
+                let (data_sender, data_receiver) = tokio::sync::mpsc::unbounded_channel();
+                data_sender.send(buf)?;
+                clients.lock().await.insert(addr, data_sender);
+
+                // Spawn a new task to handle the connection.
+                tokio::spawn(handle_udp(addr, socket_clone, data_receiver, tunnel_definition.remote_address.clone(), config_clone));
+            }
+        }
+    }
+    .await;
+
+    if let Err(err) = result {
+        error!("❌ Error starting UDP server, or accepting a connection (shutting down listener for this bind address): {}", err);
+    }
 }
+
+/// Handles a new UDP connection.
+async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data_receiver: UnboundedReceiver<Vec<u8>>, remote_address: String, config: Config) {
+    let id = random_string(6);
+    let span = info_span!("tcp", id = id);
+
+    let result: Void = async move {
+        // Connect.
+
+        let server = connect(&config, &remote_address, true).await?;
+
+        // Handle the UDP pump.
+
+        info!("⛽ Pumping data between client and remote ...");
+
+        let client_socket_clone = client_socket.clone();
+        let (mut remote_read, mut remote_write) = server.into_split();
+
+        // TODO: Figure out logic below to get them to disconnect?
+
+        let pump_up: JoinHandle<Void> = tokio::spawn(async move {
+            while let Some(data) = data_receiver.recv().await {
+                remote_write.push(ProtocolMessage::UdpData(data.to_vec())).await?;
+            }
+
+            Ok(())
+        });
+
+        let pump_down: JoinHandle<Void> = tokio::spawn(async move {
+            while let ProtocolMessage::UdpData(data) = remote_read.pull().await? {
+                client_socket_clone.send_to(&data, &address).await?;
+            }
+
+            Ok(())
+        });
+
+        // Wait for both pumps to finish.
+
+        let (result1, result2) = join!(pump_up, pump_down);
+
+        // Remove the client from the list of clients.
+
+        // TODO: Something needs to happen here when the client disconnects.
+
+        // Check for errors.
+
+        result1??;
+        result2??;
+
+        Ok(())
+    }
+    .instrument(span.clone())
+    .await;
+
+    // Enter the span, so that the error is logged with the span's metadata, if needed.
+    let _guard = span.enter();
+
+    if let Err(err) = result {
+        let chain = err.chain().collect::<Vec<_>>();
+        let full_chain = chain.iter().map(|e| format!("`{}`", e)).collect::<Vec<_>>().join(" => ");
+
+        error!("❌ Error handling the connection: {}.", full_chain);
+    }
+}
+
+// Client connection tests.
 
 /// Tests the server connection by performing a handshake.
 async fn test_server_connection(tunnel_definition: TunnelDefinition, config: Config) -> Void {
     info!("⏳ Testing server connection ...");
 
     // Connect to the server.
-    let mut remote = BuffedStream::new(remote_connect_tcp(&config.connect_address).await?);
+    let mut remote = BuffedTcpStream::from(server_connect(&config.connect_address).await?);
 
     // Handle the handshake.
-    if let Err(e) = handle_handshake(&mut remote, &config, &tunnel_definition.remote_address).await {
+    if let Err(e) = handle_handshake(&mut remote, &config, &tunnel_definition.remote_address, false).await {
         error!("❌ Test connection failed: {}", e);
         return Err(e);
     }
@@ -380,7 +517,7 @@ pub mod tests {
         let remote_address = "remote_address:3000";
         let exchange_public_key = generate_test_fake_exchange_public_key();
 
-        let client_challenge = send_preamble(&mut client, &config, remote_address, exchange_public_key).await.unwrap();
+        let client_challenge = send_preamble(&mut client, &config, remote_address, exchange_public_key, false).await.unwrap();
 
         let received = server.pull().await.unwrap();
 

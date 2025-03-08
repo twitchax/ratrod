@@ -38,7 +38,7 @@
                     "kind": "bin",
                 }
             },
-            "args": ["test_can_disallow_wrong_key_length"],
+            "args": ["test_e2e_udp"],
             "cwd": "${workspaceFolder}"
         }
     ]

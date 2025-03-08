@@ -29,6 +29,7 @@ pub struct ClientPreamble {
     pub remote: String,
     pub challenge: Challenge,
     pub should_encrypt: bool,
+    pub is_udp: bool,
 }
 
 /// Serves as the server's response to the preamble, containing its
@@ -64,6 +65,7 @@ pub enum ProtocolMessage {
     ClientAuthentication(ClientAuthentication),
     HandshakeCompletion,
     Data(Vec<u8>),
+    UdpData(Vec<u8>),
     Error(ProtocolError),
 }
 
@@ -103,6 +105,7 @@ pub enum ProtocolMessageWrapper {
 pub enum ProtocolError {
     InvalidHost(String),
     InvalidKey(String),
+    RemoteFailed(String),
     Unknown(String),
 }
 
@@ -111,6 +114,7 @@ impl Display for ProtocolError {
         match self {
             ProtocolError::InvalidHost(host) => write!(f, "Invalid host: {}", host),
             ProtocolError::InvalidKey(key) => write!(f, "Invalid key: {}", key),
+            ProtocolError::RemoteFailed(message) => write!(f, "Remote failed: {}", message),
             ProtocolError::Unknown(message) => write!(f, "Unknown: {}", message),
         }
     }
@@ -230,6 +234,7 @@ mod tests {
             remote: "remote".to_string(),
             challenge: Challenge::default(),
             should_encrypt: true,
+            is_udp: false,
         };
 
         client.push(ProtocolMessage::ClientPreamble(data.clone())).await.unwrap();

@@ -97,8 +97,8 @@ pub fn generate_ephemeral_key_pair() -> Res<ExchangeKeyPair> {
 
 pub fn generate_shared_secret(private_key: EphemeralPrivateKey, peer_public_key: &ExchangePublicKey, salt_bytes: &[u8]) -> Res<SharedSecret> {
     let unparsed_peer_public_key = ring::agreement::UnparsedPublicKey::new(Constant::AGREEMENT, peer_public_key);
-    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| generate_chacha_key(shared_secret, salt_bytes))??;
 
+    let shared_secret = agree_ephemeral(private_key, &unparsed_peer_public_key, |shared_secret| generate_chacha_key(shared_secret, salt_bytes))??;
     Ok(shared_secret)
 }
 
@@ -216,26 +216,26 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::buffed_stream::BuffedStream;
+    use crate::buffed_stream::{BuffedDuplexStream, BuffedStream};
 
     use super::*;
     use pretty_assertions::assert_eq;
 
-    pub fn generate_test_duplex() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
+    pub fn generate_test_duplex() -> (BuffedDuplexStream, BuffedDuplexStream) {
         let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);
-        (BuffedStream::new(a), BuffedStream::new(b))
+        (BuffedStream::from(a), BuffedStream::from(b))
     }
 
-    pub fn generate_test_duplex_with_encryption() -> (BuffedStream<DuplexStream>, BuffedStream<DuplexStream>) {
+    pub fn generate_test_duplex_with_encryption() -> (BuffedDuplexStream, BuffedDuplexStream) {
         let (a, b) = tokio::io::duplex(Constant::BUFFER_SIZE);
         let secret_box = generate_test_shared_secret();
         let shared_secret = secret_box.expose_secret();
 
         (
-            BuffedStream::new(a).with_encryption(SharedSecret::init_with(|| *shared_secret)),
-            BuffedStream::new(b).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedStream::from(a).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedStream::from(b).with_encryption(SharedSecret::init_with(|| *shared_secret)),
         )
     }
 

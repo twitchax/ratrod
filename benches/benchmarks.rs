@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use futures::future::join_all;
 use ratrodlib::{
     base::{Constant, ExchangeKeyPair, SharedSecret},
-    buffed_stream::BuffedStream,
+    buffed_stream::BuffedDuplexStream,
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret},
 };
 use secrecy::ExposeSecret;
@@ -27,11 +27,11 @@ async fn large_data_bench(encrypted: bool) {
         let shared_secret = secret_box.expose_secret();
 
         (
-            BuffedStream::new(client).with_encryption(SharedSecret::init_with(|| *shared_secret)),
-            BuffedStream::new(server).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedDuplexStream::from(client).with_encryption(SharedSecret::init_with(|| *shared_secret)),
+            BuffedDuplexStream::from(server).with_encryption(SharedSecret::init_with(|| *shared_secret)),
         )
     } else {
-        (BuffedStream::new(client), BuffedStream::new(server))
+        (BuffedDuplexStream::from(client), BuffedDuplexStream::from(server))
     };
 
     let data = b"Hello, world!";

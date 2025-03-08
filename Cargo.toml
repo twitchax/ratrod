@@ -16,7 +16,7 @@ name = "ratrod"
 path = "src/bin.rs"
 
 [dependencies]
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = { version = "1" }
 rand = { version = "0.9", default-features = false, features = ["thread_rng"] }

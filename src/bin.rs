@@ -173,23 +173,37 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
+        net::{TcpListener, TcpStream, UdpSocket},
     };
 
     pub struct EchoServer;
 
     impl EchoServer {
-        pub async fn start(bind_address: String) -> Void {
-            let listener = TcpListener::bind(bind_address).await?;
+        pub fn start(bind_address: String) {
+            let bind_address2 = bind_address.clone();
 
-            loop {
-                let (client, _) = listener.accept().await?;
-                tokio::spawn(async move {
-                    let (mut read, mut write) = client.into_split();
+            tokio::spawn(async move {
+                let listener = TcpListener::bind(bind_address).await.unwrap();
 
-                    let _ = tokio::io::copy(&mut read, &mut write).await;
-                });
-            }
+                loop {
+                    let (client, _) = listener.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        let (mut read, mut write) = client.into_split();
+
+                        let _ = tokio::io::copy(&mut read, &mut write).await;
+                    });
+                }
+            });
+
+            tokio::spawn(async move {
+                let socket = UdpSocket::bind(bind_address2).await.unwrap();
+
+                loop {
+                    let mut buffer = vec![0; 1024];
+                    let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                    socket.send_to(&buffer[..size], peer).await.unwrap();
+                }
+            });
         }
     }
 
@@ -200,7 +214,7 @@ mod tests {
         let client_addresses = [format!("127.0.0.1:{}", port + 2), format!("127.0.0.1:{}", port + 3)];
 
         // Start a "remote" echo server.
-        tokio::spawn(EchoServer::start(remote_address));
+        EchoServer::start(remote_address);
 
         // Start a "server".
         tokio::spawn(ratrodlib::serve::Instance::prepare(server_key_path, remote_regex, server_address.clone()).unwrap().start());
@@ -368,5 +382,69 @@ mod tests {
         // intermediary disconnected because the host is bad.
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Connection reset by peer (os error 104)");
+    }
+
+    #[tokio::test]
+    async fn test_e2e_udp() {
+        let remote_regex = ".*".to_string();
+        let port = 3400;
+
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/client".to_owned(), remote_regex, port, false).await;
+
+        // Open a client connection.
+
+        let client = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        client.connect(&client_addresses[0]).await.unwrap();
+
+        // Send a message to the server.
+        let message = b"Hello, world!";
+        client.send(message).await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        client.recv(&mut buffer).await.unwrap();
+
+        assert_eq!(buffer, message);
+
+        // Send another message to the server.
+        let message = b"bello, world!";
+        client.send(message).await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        client.recv(&mut buffer).await.unwrap();
+        assert_eq!(buffer, message);
+    }
+
+    #[tokio::test]
+    async fn test_e2e_udp_encrypted() {
+        let remote_regex = ".*".to_string();
+        let port = 3500;
+
+        let client_addresses = bootstrap_e2e("./test/server".to_owned(), "./test/client".to_owned(), remote_regex, port, true).await;
+
+        // Open a client connection.
+
+        let client = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        client.connect(&client_addresses[0]).await.unwrap();
+
+        // Send a message to the server.
+        let message = b"Hello, world!";
+        client.send(message).await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        client.recv(&mut buffer).await.unwrap();
+
+        assert_eq!(buffer, message);
+
+        // Send another message to the server.
+        let message = b"bello, world!";
+        client.send(message).await.unwrap();
+
+        // Read the message back from the server.
+        let mut buffer = vec![0; message.len()];
+        client.recv(&mut buffer).await.unwrap();
+        assert_eq!(buffer, message);
     }
 }

@@ -1,16 +1,20 @@
 //! This module implements the server-side of the protocol.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use anyhow::Context;
+use futures::join;
 use regex::Regex;
 use secrecy::SecretString;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    task::JoinHandle,
+};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{ExchangeKeyPair, Res, ServerKeyExchangeData, Void},
-    buffed_stream::BuffedStream,
+    base::{Constant, ExchangeKeyPair, Res, ServerKeyExchangeData, Void},
+    buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientPreamble, ProtocolError, ProtocolMessage, ServerPreamble, Signature},
     security::{resolve_authorized_keys, resolve_keypath, resolve_private_key, resolve_public_key},
     utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, sign_challenge, validate_signed_challenge},
@@ -57,7 +61,7 @@ impl Instance<ReadyState> {
     pub async fn start(self) -> Void {
         info!("🚀 Starting server on `{}` ...", self.config.bind_address);
 
-        run_tcp_server(self.config).await?;
+        run_tcp_server(self.config.clone()).await?;
 
         Ok(())
     }
@@ -196,7 +200,76 @@ where
         local_challenge: server_challenge,
         requested_remote_address: preamble.remote,
         requested_should_encrypt: preamble.should_encrypt,
+        requested_is_udp: preamble.is_udp,
     })
+}
+
+/// Runs the pump with a TCP-connected remote.
+async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
+    let Ok(mut remote) = TcpStream::connect(remote_address).await.context("Error connecting to remote") else {
+        return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
+            .send_and_bail(&mut client)
+            .await;
+    };
+
+    info!("✅ Connected to remote server `{}`.", remote_address);
+
+    handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
+
+    Ok(())
+}
+
+/// Runs the pump with a UDP-connected remote.
+async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
+    // Attempt to connect to the remote address (should only fail in weird circumstances).
+
+    let remote = UdpSocket::bind("127.0.0.1:0").await.context("Error binding UDP socket")?;
+    if remote.connect(remote_address).await.is_err() {
+        return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
+            .send_and_bail(&mut client)
+            .await;
+    }
+
+    info!("✅ Connected to remote server `{}`.", remote_address);
+
+    // Split the client connection into a read and write half.
+    let (mut client_read, mut client_write) = client.into_split();
+
+    // Split the remote connection into a read and write half (just requires `Arc`ing, since the UDP send / receive does not require `&mut`).
+    let remote_up = Arc::new(remote);
+    let remote_down = remote_up.clone();
+
+    // Run the pumps.
+
+    // TODO: Figure out logic below to get them to disconnect?
+
+    let pump_up: JoinHandle<Void> = tokio::spawn(async move {
+        while let ProtocolMessage::UdpData(data) = client_read.pull().await? {
+            remote_up.send(&data).await?;
+        }
+
+        Ok(())
+    });
+
+    let pump_down: JoinHandle<Void> = tokio::spawn(async move {
+        let mut buf = [0; Constant::BUFFER_SIZE];
+
+        loop {
+            let size = remote_down.recv(&mut buf).await?;
+            client_write.push(ProtocolMessage::UdpData(buf[..size].to_vec())).await?;
+        }
+    });
+
+    // Wait for the pumps to finish.
+
+    let (result1, result2) = join!(pump_up, pump_down);
+
+    // Check for errors.
+
+    result1??;
+    result2??;
+
+    Ok(())
 }
 
 /// Runs the TCP server.
@@ -208,7 +281,7 @@ async fn run_tcp_server(config: Config) -> Void {
     loop {
         let (socket, _) = listener.accept().await?;
 
-        tokio::spawn(handle_tcp(socket, config.clone()));
+        tokio::spawn(handle_connection(socket, config.clone()));
     }
 }
 
@@ -216,26 +289,20 @@ async fn run_tcp_server(config: Config) -> Void {
 ///
 /// This is used to handle the TCP connection between the client and server.
 /// It handles the handshake, and pumps data between the client and server.
-async fn handle_tcp(client: TcpStream, config: Config) {
-    let mut client = BuffedStream::new(client);
+async fn handle_connection(client: TcpStream, config: Config) {
+    let mut client = BuffedTcpStream::from(client);
 
     let id = random_string(6);
     let span = info_span!("conn", id = id);
 
     let result: Void = async move {
-        let peer_addr = client.peer_addr().context("Error getting peer address")?;
+        let peer_addr = client.as_inner_tcp_write_ref().peer_addr().context("Error getting peer address")?;
 
         info!("✅ Accepted connection from `{}`.", peer_addr);
 
         // Handle the handshake.
 
         let handshake_data = handle_handshake(&mut client, &config).await.context("Error handling handshake")?;
-
-        // Connect to remote.
-
-        let mut remote = TcpStream::connect(&handshake_data.requested_remote_address).await.context("Error connecting to remote")?;
-
-        info!("✅ Connected to remote server `{}`.", handshake_data.requested_remote_address);
 
         // Generate and apply the shared secret, if needed.
         if handshake_data.requested_should_encrypt {
@@ -247,11 +314,15 @@ async fn handle_tcp(client: TcpStream, config: Config) {
             info!("🔒 Encryption applied ...");
         }
 
-        // Handle the TCP pump.
+        // Handle the pump.
 
         info!("⛽ Pumping data between client and remote ...");
 
-        handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
+        if handshake_data.requested_is_udp {
+            run_udp_pump(client, &handshake_data.requested_remote_address).await?;
+        } else {
+            run_tcp_pump(client, &handshake_data.requested_remote_address).await?;
+        }
 
         info!("✅ Connection closed.");
 
@@ -358,6 +429,7 @@ mod tests {
             challenge: client_challenge,
             exchange_public_key: generate_test_fake_exchange_public_key(),
             should_encrypt: true,
+            is_udp: false,
         };
 
         client.push(ProtocolMessage::ClientPreamble(client_preamble.clone())).await.unwrap();
@@ -439,6 +511,7 @@ mod tests {
             challenge: [9u8; 32],
             exchange_public_key: generate_test_fake_exchange_public_key(),
             should_encrypt: false,
+            is_udp: false,
         };
 
         client.push(ProtocolMessage::ClientPreamble(client_preamble)).await.unwrap();
@@ -470,6 +543,7 @@ mod tests {
             challenge: [10u8; 32],
             exchange_public_key: generate_test_fake_exchange_public_key(),
             should_encrypt: false,
+            is_udp: false,
         };
 
         client.push(ProtocolMessage::ClientPreamble(client_preamble)).await.unwrap();
