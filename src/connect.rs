@@ -81,8 +81,15 @@ impl Instance<ReadyState> {
                 tokio::spawn(test_server_connection(tunnel_definition.clone(), self.config.clone()));
 
                 // Start the servers.
-                tokio::spawn(run_tcp_server(tunnel_definition.clone(), self.config.clone()));
-                tokio::spawn(run_udp_server(tunnel_definition, self.config.clone()));
+                let tcp = tokio::spawn(run_tcp_server(tunnel_definition.clone(), self.config.clone()));
+                let udp = tokio::spawn(run_udp_server(tunnel_definition, self.config.clone()));
+
+                let (tcp_result, udp_result) = join!(tcp, udp);
+
+                tcp_result?;
+                udp_result?;
+
+                Void::Ok(())
             })
             .collect::<Vec<_>>();
 
