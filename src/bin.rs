@@ -7,11 +7,8 @@
 #![feature(const_type_name)]
 
 use clap::{Parser, Subcommand};
-use ratrodlib::security::generate;
-use ratrodlib::{
-    base::{Err, Void},
-    security::resolve_keypath,
-};
+use ratrodlib::base::{Err, Void};
+use ratrodlib::security::ensure_security_files;
 use tracing::error;
 
 #[coverage(off)]
@@ -19,6 +16,7 @@ use tracing::error;
 async fn main() {
     let args = Args::parse();
 
+    let key_path = args.key_path;
     let level = if args.verbose { tracing::Level::DEBUG } else { tracing::Level::INFO };
 
     tracing_subscriber::fmt()
@@ -31,7 +29,7 @@ async fn main() {
         .with_max_level(level)
         .init();
 
-    let result = execute_command(args.command).await;
+    let result = execute_command(key_path, args.command).await;
 
     if let Err(err) = result {
         error!("❌ {}", err);
@@ -39,17 +37,15 @@ async fn main() {
     }
 }
 
-async fn execute_command(command: Option<Command>) -> Void {
+async fn execute_command(key_path: Option<String>, command: Option<Command>) -> Void {
+    ensure_security_files(key_path.clone())?;
+
     match command {
-        Some(Command::Serve { bind, key_path, remote_regex }) => {
+        Some(Command::Serve { bind, remote_regex }) => {
             ratrodlib::serve::Instance::prepare(key_path, remote_regex, bind)?.start().await?;
         }
-        Some(Command::Connect { server, tunnel, key_path, encrypt }) => {
+        Some(Command::Connect { server, tunnel, encrypt }) => {
             ratrodlib::connect::Instance::prepare(key_path, server, &tunnel, encrypt)?.start().await?;
-        }
-        Some(Command::GenerateKeypair { output, path }) => {
-            let key_path = resolve_keypath(path)?;
-            generate(output, key_path)?;
         }
         None => {
             return Err(Err::msg("No command specified."));
@@ -70,6 +66,12 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Specifies the path to the key store (`key`, `key.pub`, `authorized_keys`, and `known_hosts`).
+    ///
+    /// The default value is `$HOME/.ratrod`.
+    #[arg(short, long)]
+    key_path: Option<String>,
+
     /// Flag that specifies verbose logging.
     #[arg(short, long)]
     verbose: bool,
@@ -88,12 +90,6 @@ enum Command {
         /// or `192.168.1.100:3000` to listen for connections from other
         /// machines on a specific interface.
         bind: String,
-
-        /// Specifies the path to the key store (`key`, `key.pub`, `authorized_keys`).
-        ///
-        /// The default value is read from `$HOME/.ratrod`.
-        #[arg(short, long)]
-        key_path: Option<String>,
 
         /// Specifies an optional regex restriction on the remote hostnames that can be connected to.
         /// This is used to prevent clients from connecting to arbitrary through the server.
@@ -134,34 +130,11 @@ enum Command {
         ///   must act as a TCP proxy.
         tunnel: Vec<String>,
 
-        /// Specifies a private key to use for authentication from connecting clients.  This can be either
-        /// a base64-encoded keyfile, or a base64-encoded key.
-        ///
-        /// The key is checked at connection time.
-        /// The key is not used for encryption.  The default value is read from `$HOME/.ratrod/key`.
-        #[arg(short, long)]
-        key_path: Option<String>,
-
         /// Specifies whether to encrypt the traffic between the client and server.
         ///
         /// Both the client and server must specify this flag for it to take effect properly.
         #[arg(short, long, default_value_t = false)]
         encrypt: bool,
-    },
-
-    /// Generates a keypair and prints it to the console.
-    ///
-    /// This allows the user to easily get a keypair for use
-    /// with the `serve` command, if they are looking for a
-    /// stable keypair.
-    GenerateKeypair {
-        /// Specifies that the keypair should be printed to stdout.
-        #[arg(short, long)]
-        output: bool,
-
-        /// Specifies the location to write the keypair to (the default is `$HOME/.ratrod`).
-        #[arg(short, long)]
-        path: Option<String>,
     },
 }
 
@@ -233,25 +206,23 @@ mod tests {
 
     #[test]
     fn test_args() {
-        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--key-path", "key", "--remote-regex", ".*"]);
+        let args = Args::parse_from(["", "serve", "127.0.0.1:3000", "--remote-regex", ".*"]);
 
         assert_eq!(
             args.command,
             Some(Command::Serve {
                 bind: "127.0.0.1:3000".to_string(),
-                key_path: Some("key".to_string()),
                 remote_regex: ".*".to_string(),
             })
         );
 
-        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "--key-path", "key", "-e"]);
+        let args = Args::parse_from(["", "connect", "127.0.0.1:3000", "3000:127.0.0.1:3000", "4000", "-e"]);
 
         assert_eq!(
             args.command,
             Some(Command::Connect {
                 server: "127.0.0.1:3000".to_string(),
                 tunnel: vec!["3000:127.0.0.1:3000".to_string(), "4000".to_string()],
-                key_path: Some("key".to_string()),
                 encrypt: true
             })
         );

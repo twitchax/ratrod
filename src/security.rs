@@ -2,6 +2,8 @@
 //!
 //! This module provides functions to generate a keypair, resolve private and public keys from files or strings, and handle errors related to key resolution.
 
+use std::io::Write;
+
 use anyhow::Context;
 use secrecy::SecretString;
 use tracing::info;
@@ -50,12 +52,54 @@ where
 
     std::fs::create_dir_all(path.as_ref()).context("Failed to create directory")?;
 
-    let file = format!("{}/key", path.as_ref());
+    let key_file = format!("{}/key", path.as_ref());
 
-    std::fs::write(&file, pair.private_key).context("Failed to write private key")?;
-    std::fs::write(format!("{}.pub", file), pair.public_key).context("Failed to write public key")?;
+    if !std::fs::exists(&key_file)? {
+        std::fs::write(&key_file, pair.private_key).context("Failed to write private key")?;
+        std::fs::write(format!("{}.pub", key_file), pair.public_key).context("Failed to write public key")?;
+    }
 
-    info!("📦 Keypair written to `{}`", file);
+    let known_hosts_file = format!("{}/known_hosts", path.as_ref());
+    let authorized_keys_file = format!("{}/authorized_keys", path.as_ref());
+
+    if !std::fs::exists(&known_hosts_file)? {
+        std::fs::write(&known_hosts_file, "").context("Failed to write known hosts")?;
+    }
+
+    if !std::fs::exists(&authorized_keys_file)? {
+        std::fs::write(&authorized_keys_file, "").context("Failed to write authorized keys")?;
+    }
+
+    info!("📦 Security files written to `{}`", key_file);
+
+    Ok(())
+}
+
+/// Ensures all required security files are present and generates them if not.
+pub fn ensure_security_files<P>(path: P) -> Void
+where
+    P: Into<Option<String>>,
+{
+    let path = resolve_keypath(path)?;
+    let key_path = format!("{}/key", path);
+
+    if !std::fs::exists(&key_path)? {
+        info!("No security files present in `{}` ...", path);
+
+        print!("Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)? ");
+        std::io::stdout().flush().context("Failed to flush stdout")?;
+        info!("foo");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).context("Failed to read user input")?;
+        let input = input.trim().to_lowercase();
+
+        if input != "y" {
+            return Err(Err::msg("User declined to generate security files."));
+        }
+
+        info!("Generating security files ...");
+        generate(false, &path)?;
+    }
 
     Ok(())
 }
