@@ -43,7 +43,7 @@ pub struct Instance<S = ConfigState> {
 
 impl Instance<ConfigState> {
     /// Prepares the client instance.
-    pub fn prepare<A, B, C>(key_path: A, connect_address: B, tunnel_definitions: &[C], should_encrypt: bool) -> Res<Instance<ReadyState>>
+    pub fn prepare<A, B, C>(key_path: A, connect_address: B, tunnel_definitions: &[C], accept_all_hosts: bool, should_encrypt: bool) -> Res<Instance<ReadyState>>
     where
         A: Into<Option<String>>,
         B: Into<String>,
@@ -56,7 +56,7 @@ impl Instance<ConfigState> {
         let public_key = resolve_public_key(&key_path)?;
         let known_hosts = resolve_known_hosts(&key_path);
 
-        let config = Config::new(public_key, private_key, known_hosts, connect_address.into(), should_encrypt)?;
+        let config = Config::new(public_key, private_key, known_hosts, connect_address.into(), accept_all_hosts, should_encrypt)?;
 
         Ok(Instance {
             tunnel_definitions,
@@ -151,8 +151,8 @@ where
 
     // Ensure that the server is in the `known_hosts` file.
 
-    if !config.known_hosts.contains(&server_preamble.identity_public_key) {
-        // Client doesn;t really need to tell the server about failures, so will error and break the pipe.
+    if !config.accept_all_hosts && !config.known_hosts.contains(&server_preamble.identity_public_key) {
+        // Client doesn't really need to tell the server about failures, so will error and break the pipe.
         return Err(Err::msg(format!("Server's public key `{}` is not in the known hosts file", server_preamble.identity_public_key)));
     }
 
@@ -444,17 +444,19 @@ pub(crate) struct Config {
     pub(crate) private_key: SecretString,
     pub(crate) known_hosts: Vec<String>,
     pub(crate) connect_address: String,
+    pub(crate) accept_all_hosts: bool,
     pub(crate) should_encrypt: bool,
 }
 
 impl Config {
     /// Creates a new configuration.
-    fn new(public_key: String, private_key: SecretString, known_hosts: Vec<String>, connect_address: String, should_encrypt: bool) -> Res<Self> {
+    fn new(public_key: String, private_key: SecretString, known_hosts: Vec<String>, connect_address: String, accept_all_hosts: bool, should_encrypt: bool) -> Res<Self> {
         Ok(Self {
             public_key,
             private_key,
             connect_address,
             known_hosts,
+            accept_all_hosts,
             should_encrypt,
         })
     }
@@ -484,6 +486,7 @@ pub mod tests {
             private_key,
             known_hosts,
             connect_address: "connect_address".to_string(),
+            accept_all_hosts: false,
             should_encrypt: false,
         }
     }
@@ -493,9 +496,10 @@ pub mod tests {
         let key_path = "test/client";
         let connect_address = "connect_address";
         let tunnel_definitions = ["localhost:5000:example.com:80", "127.0.0.1:6000:api.example.com:443"];
+        let accrpt_all_hosts = false;
         let should_encrypt = false;
 
-        let instance = Instance::prepare(key_path.to_owned(), connect_address, &tunnel_definitions, should_encrypt).unwrap();
+        let instance = Instance::prepare(key_path.to_owned(), connect_address, &tunnel_definitions, accrpt_all_hosts, should_encrypt).unwrap();
 
         // Verify config
         assert_eq!(instance.config.connect_address, connect_address);
