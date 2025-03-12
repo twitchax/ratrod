@@ -235,6 +235,12 @@ sequenceDiagram
     end
 ```
 
+## Etymology
+
+It a reference to the [Rat Rod](https://en.wikipedia.org/wiki/Rat_rod) car culture, which is all about building something that works, even if it's "rusty".
+
+Essentially, I googled "rusty pipe", and didn;t get much, so I googled "rusty rod", and google figured I meant "rat rod".  I thought it was a good name, so I went with it.
+
 ## Testing
 
 ```bash
