@@ -5,6 +5,7 @@
 
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
+#![feature(duration_constructors)]
 
 pub use tokio;
 

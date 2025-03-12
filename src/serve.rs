@@ -3,12 +3,10 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use anyhow::Context;
-use futures::join;
 use regex::Regex;
 use secrecy::SecretString;
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
-    task::JoinHandle,
+    net::{TcpListener, TcpStream, UdpSocket}, select, task::JoinHandle, time::Instant
 };
 use tracing::{Instrument, error, info, info_span};
 
@@ -240,12 +238,15 @@ async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
     let remote_down = remote_up.clone();
 
     // Run the pumps.
-
-    // TODO: Figure out logic below to get them to disconnect?
+    
+    let last_activity = Arc::new(tokio::sync::Mutex::new(Instant::now()));
+    let last_activity_up = last_activity.clone();
+    let last_activity_down = last_activity.clone();
 
     let pump_up: JoinHandle<Void> = tokio::spawn(async move {
         while let ProtocolMessage::UdpData(data) = client_read.pull().await? {
             remote_up.send(&data).await?;
+            *last_activity_up.lock().await = Instant::now();
         }
 
         Ok(())
@@ -257,17 +258,38 @@ async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
         loop {
             let size = remote_down.recv(&mut buf).await?;
             client_write.push(ProtocolMessage::UdpData(buf[..size].to_vec())).await?;
+            *last_activity_down.lock().await = Instant::now();
         }
     });
 
-    // Wait for the pumps to finish.
+    let timeout: JoinHandle<Void> = tokio::spawn(async move {
+        loop {
+            let last_activity = *last_activity.lock().await;
 
-    let (result1, result2) = join!(pump_up, pump_down);
+            if last_activity.elapsed() > Constant::UDP_TIMEOUT {
+                info!("✅ UDP connection timed out (assumed graceful close).");
+                return Ok(());
+            }
+
+            tokio::time::sleep(Constant::UDP_TIMEOUT).await;
+        }
+    });
+
+    // Wait for the pumps to finish.  This employs a "last activity" type timeout, and uses `select!` to break
+    // out of the loop if any of the pumps finish.  In general, the UDP side to the remote will not close,
+    // but the client may break the pipe, so we need to handle that.
+    // The `select!` macro will return the first result that completes,
+    // and the `timeout` will return if the last activity is too long ago.
+
+    let result = select! {
+        r = pump_up => r?,
+        r = pump_down => r?,
+        r = timeout => r?,
+    };
 
     // Check for errors.
 
-    result1??;
-    result2??;
+    result?;
 
     Ok(())
 }

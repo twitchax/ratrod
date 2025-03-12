@@ -8,12 +8,9 @@ use anyhow::Context;
 use futures::join;
 use secrecy::SecretString;
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
-    sync::{
-        Mutex,
-        mpsc::{UnboundedReceiver, UnboundedSender},
-    },
-    task::JoinHandle,
+    net::{TcpListener, TcpStream, UdpSocket}, select, sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender}, Mutex
+    }, task::JoinHandle
 };
 use tracing::{Instrument, error, info, info_span};
 
@@ -338,7 +335,15 @@ async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
                 clients.lock().await.insert(addr, data_sender);
 
                 // Spawn a new task to handle the connection.
-                tokio::spawn(handle_udp(addr, socket_clone, data_receiver, tunnel_definition.remote_address.clone(), config_clone));
+                let clients_clone = clients.clone();
+                let remote_address = tunnel_definition.remote_address.clone();
+                tokio::spawn(async move {
+                    // Handle the connection.
+                    handle_udp(addr, socket_clone, data_receiver, remote_address, config_clone).await;
+
+                    // Remove the client from the list of clients.
+                    clients_clone.lock().await.remove(&addr);
+                });
             }
         }
     }
@@ -384,18 +389,18 @@ async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data
             Ok(())
         });
 
-        // Wait for both pumps to finish.
+        // Wait for either side to finish (server handles the connection closing when it has not detected activity on the pump).
+        // Essentially, we are waiting for either side to finish, or to time out.  The server will handle the timeout, which will close the
+        // TCP side, which will then close the UDP side (and then the client is removed from the client list).
 
-        let (result1, result2) = join!(pump_up, pump_down);
-
-        // Remove the client from the list of clients.
-
-        // TODO: Something needs to happen here when the client disconnects.
+        let result = select! {
+            r = pump_up => r?,
+            r = pump_down => r?,
+        };
 
         // Check for errors.
 
-        result1??;
-        result2??;
+        result?;
 
         Ok(())
     }

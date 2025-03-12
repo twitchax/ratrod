@@ -2,6 +2,8 @@
 //!
 //! It includes constants for cryptographic algorithms, buffer sizes, and other parameters.
 
+use std::time::Duration;
+
 use base64::{engine::GeneralPurpose, prelude::BASE64_URL_SAFE_NO_PAD};
 use ring::{
     aead::{self, CHACHA20_POLY1305},
@@ -40,6 +42,7 @@ impl Constant {
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
     pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
     pub const SIGNATURE_SIZE: usize = 64;
+    pub const UDP_TIMEOUT: Duration = Duration::from_mins(2);
 }
 
 /// A helper for the Shape of the shared secret.
