@@ -192,9 +192,12 @@ $ cargo install ratrod
 
 ```mermaid
 sequenceDiagram
+    participant Originator
     participant Client
     participant Server
     participant Remote
+
+    Originator->>Client: TCP or UDP Connection
 
     Note over Client,Server: Key-Based Authentication & Setup
     Client->>Server: TCP Connection
@@ -215,24 +218,19 @@ sequenceDiagram
 
     Server->>Client: HandshakeCompletion
 
-    Note over Client,Server: Optional Encryption Setup
+    Note over Client,Server: Optional Encryption
     alt encryption requested
         Client->>Client: Generate shared secret from ephemeral keys
         Server->>Server: Generate shared secret from ephemeral keys
     end
 
-    Note over Client,Server: Tunnel Establishment
-    alt TCP Tunnel
-        Client->>Client: Accept connections on local_port
-        Client->>Server: Forward data through encrypted channel
-        Server->>Remote: Connect to remote_host:remote_port
-        Server->>Server: Bidirectional copy between client and remote
-    else UDP Tunnel
-        Client->>Client: Bind UDP on local_port
-        Client->>Server: Forward UDP data as ProtocolMessage::UdpData
-        Server->>Remote: Connect UDP to remote_host:remote_port
-        Server->>Server: Activity timeout monitoring
-    end
+    Note over Client,Server: Tunnel Establishment / Pump<br>(TCP / UDP handled slightly differently)
+    Originator->>Client: Upstream data (TCP or UDP)
+    Client->>Server: Forward data through (encrypted) channel (TCP)
+    Server->>Remote: Forward data to remote (TCP or UDP)
+    Remote->>Server: Downstream data (TCP or UDP)
+    Server->>Client: Forward data through (encrypted) channel (TCP)
+    Client->>Originator: Forward to originator (TCP or UDP)
 ```
 
 ## Etymology
