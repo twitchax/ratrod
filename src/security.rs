@@ -88,7 +88,6 @@ where
 
         print!("Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)? ");
         std::io::stdout().flush().context("Failed to flush stdout")?;
-        info!("foo");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).context("Failed to read user input")?;
         let input = input.trim().to_lowercase();

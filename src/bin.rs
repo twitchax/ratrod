@@ -58,7 +58,7 @@ async fn execute_command(key_path: Option<String>, command: Option<Command>) -> 
 /// Tunnels a local port to a remote server, which then redirects
 /// traffic to a specified remote host.
 ///
-/// A TCP tunneler that uses public / private key authentication with encryption.
+/// A TCP / UDP tunneler that uses public / private key authentication with encryption.
 /// Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -133,7 +133,7 @@ enum Command {
         ///   must act as a TCP proxy.
         tunnel: Vec<String>,
 
-        /// Specifies that all server public keys should be accepted, and written to the `known_hosts` file.
+        /// Specifies that all server public keys should be accepted.
         #[arg(short, long, default_value_t = false)]
         accept_all_hosts: bool,
 

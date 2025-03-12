@@ -13,56 +13,23 @@ A TCP tunneler that uses public / private key authentication with encryption.  B
 
 ```bash
 $ ratrod -h
-Tunnels a local port to a remote server, which then redirects traffic to a specified remote host.
+A TCP / UDP tunneler that uses public / private key authentication with encryption.
 
 Usage: ratrod [OPTIONS] [COMMAND]
 
 Commands:
-  serve             Start a server on this machine that listens for incoming connections and forwards them to a remote server (as specified by the client)
-  connect           Connects to a server and forwards traffic from a local port to a remote `host:port` "through" the server
-  generate-keypair  Generates a keypair and prints it to the console
-  help              Print this message or the help of the given subcommand(s)
+  serve    Start a server on this machine that listens for incoming connections and forwards them to a remote server (as specified by the client)
+  connect  Connects to a server and forwards traffic from a local port to a remote `host:port` "through" the server
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -v, --verbose  Flag that specifies verbose logging
-  -h, --help     Print help
-  -V, --version  Print version
+  -k, --key-path <KEY_PATH>  Specifies the path to the key store (`key`, `key.pub`, `authorized_keys`, and `known_hosts`)
+  -v, --verbose              Flag that specifies verbose logging
+  -h, --help                 Print help (see more with '--help')
+  -V, --version              Print version
 ```
 
 Below illustrates a common flow.
-
-### Generate Keypair
-
-On the client, generate a keypair.  Really, this can be done from anywhere, but the "safest" method would be to generate the keypair on the client.
-
-```bash
-$ ratrod generate-keypair -h
-Generates a keypair and prints it to the console
-
-Usage: ratrod generate-keypair [OPTIONS]
-
-Options:
-  -p, --print                Specifies that the keypair should be printed to stdout
-  -l, --location <LOCATION>  Specifies the location to write the keypair to (the default is `$HOME/.ratrod`)
-  -f, --filename <FILENAME>  Indicates the filename to write the keypair to (the default is `key`) [default: key]
-  -h, --help                 Print help (see more with '--help')
-```
-
-Then, the easiest option is to just use the default location and filename.
-
-```bash
-$ ratrod generate-keypair
-2025-02-28T07:36:09.213051Z  INFO 📦 Keypair written to `/home/user/.ratrod/key`
-```
-
-This will also write `key.pub` to the same location.
-
-```bash
-$ cat ~/.ratrod/key.pub
-HQYY0BNIhdawY2Jw62DudkUsK2GKj3hGO3qSVBlCinI
-```
-
-Then, via whatever means you prefer, copy the public key to the server at the most convenient location (`$HOME/.ratrod/key.pub` is the default).
 
 ### Start a Server
 
@@ -76,28 +43,43 @@ Arguments:
   <BIND>  Specifies the local `host:port` to bind to
 
 Options:
-  -k, --key <KEY>                    Specifies a public key to use for authentication from connecting clients.  This can be either a base64-encoded keyfile, or a base64-encoded key
   -r, --remote-regex <REMOTE_REGEX>  Specifies an optional regex restriction on the remote hostnames that can be connected to. This is used to prevent clients from connecting to arbitrary through the server [default: .*]
   -h, --help                         Print help (see more with '--help')
+```
+
+First run will ask if you want to generate the keypair.
+
+```bash
+$ ratrod serve 0.0.0.0:19000
+2025-03-12T22:56:13.939034Z  INFO No security files present in `/home/user/.ratrod` ...
+Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)?
+```
+
+If you choose `y`, it will generate the keypair and store it in `$HOME/.ratrod/key` and `$HOME/.ratrod/key.pub`.  An empty `known_hosts` and `authorized_keys` file will also be created.
+
+If you specify a keypath, it will look / generate into that directory.
+
+```bash
+$ ratrod -k keys serve 0.0.0.0:19000
+2025-03-12T22:57:53.493477Z  INFO No security files present in `keys` ...
+Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)? y
+2025-03-12T22:57:55.535365Z  INFO Generating security files ...
+2025-03-12T22:57:55.535986Z  INFO 📦 Security files written to `keys/key`
+2025-03-12T22:57:55.536653Z  INFO 🚀 Starting server on `0.0.0.0:19000` ...
 ```
 
 Basic usage pulls the key from the default location (`$HOME/.ratrod/key.pub`).
 
 ```bash
 $ ratrod serve 0.0.0.0:19000
-2025-02-28T07:39:04.925015Z  INFO 🚀 Starting server on `0.0.0.0:19000` ...
+2025-03-12T22:59:24.072923Z  INFO 🚀 Starting server on `0.0.0.0:19000` ...
 ```
 
-Otherwise, you can specify the public key with the `--key` (`-k`) flag.
-
-```bash
-$ ratrod serve -k HQYY0BNIhdawY2Jw62DudkUsK2GKj3hGO3qSVBlCinI 0.0.0.0:19000
-```
-
+Otherwise, you can specify the keypath with the `--key` (`-k`) flag.
 Or, pass the keyfile.
 
 ```bash
-$ ratrod serve -k ~/.ratrod/key.pub 0.0.0.0:19000
+$ ratrod -k ~/mykeys serve 0.0.0.0:19000
 ```
 
 ### Connect to a Server
@@ -113,23 +95,48 @@ Arguments:
   [TUNNEL]...  Specifies the remote(s) (e.g., `client_port:host:remote_port`) that the client wishes the server to route the traffic to
 
 Options:
-  -k, --key <KEY>  Specifies a private key to use for authentication from connecting clients.  This can be either a base64-encoded keyfile, or a base64-encoded key
-  -e, --encrypt    Specifies whether to encrypt the traffic between the client and server
-  -h, --help       Print help (see more with '--help')
+  -a, --accept-all-hosts  Specifies that all server public keys should be accepted
+  -e, --encrypt           Specifies whether to encrypt the traffic between the client and server
+  -h, --help              Print help (see more with '--help')
 ```
+
+First run will ask if you want to generate the keypair.
+
+```bash
+$ ratrod connect 192.168.1.100:19000 2000:google.com:80
+2025-03-12T22:56:13.939034Z  INFO No security files present in `/home/user/.ratrod` ...
+Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)?
+```
+
+At this point, you should make sure the server adds your public key to the `authorized_keys` file on the server.  This is done by copying the contents of `key.pub` to the server's `authorized_keys` file.
 
 Usage is as simple as (assuming you're using the default keyfile location):
 
 ```bash
 $ ratrod connect 192.168.1.100:19000 2000:google.com:80
-2025-02-28T07:44:01.795619Z  INFO ⏳ Testing server connection ...
-2025-02-28T07:44:01.795650Z  INFO 📻 Listening on `127.0.0.1:2000`, and routing through `192.168.229.100:19000` to `google.com:80` ...
-2025-02-28T07:44:01.795799Z  INFO ✅ Connected to server `192.168.229.100:19000` ...
-2025-02-28T07:44:01.795938Z  INFO ✅ Sent preamble to server ...
-2025-02-28T07:44:01.796165Z  INFO 🚧 Handshake challenge received ...
-2025-02-28T07:44:01.796294Z  INFO ⏳ Awaiting challenge validation ...
-2025-02-28T07:44:01.796596Z  INFO ✅ Challenge accepted!
-2025-02-28T07:44:01.796609Z  INFO ✅ Test connection successful!
+2025-03-12T23:02:55.563197Z  INFO ⏳ Testing server connection ...
+2025-03-12T23:02:55.563274Z  INFO 📻 [TCP] Listening on `127.0.0.1:2000`, and routing through `192.168.1.100:19000` to `google.com:80` ...
+2025-03-12T23:02:55.563282Z  INFO 📻 [UDP] Listening on `127.0.0.1:2000`, and routing through `192.168.1.100:19000` to `google.com:80` ...
+2025-03-12T23:02:55.563378Z  INFO ✅ Connected to server `192.168.1.100:19000` ...
+2025-03-12T23:02:55.563496Z  INFO ✅ Sent preamble to server ...
+2025-03-12T23:02:55.563886Z  INFO ✅ Server's signature validated with public key `OLtgafdheGshrj5EzuuS0c30UL2KVZDTaX7N5bSI8Zo` ...
+2025-03-12T23:02:55.563908Z ERROR ❌ Test connection failed: Server's public key `OLtgafdheGshrj5EzuuS0c30UL2KVZDTaX7N5bSI8Zo` is not in the known hosts file
+```
+
+You will have to make sure the server's public key is in the `known_hosts` file.  Or, you can use the `--accept-all-hosts` (`-a`) flag to accept all server public keys.
+
+```bash
+$ ratrod connect -a 192.168.1.100:19000 2000:google.com:80
+2025-03-12T23:08:03.680555Z  INFO ⏳ Testing server connection ...
+2025-03-12T23:08:03.680580Z  INFO 📻 [UDP] Listening on `127.0.0.1:2000`, and routing through `192.168.1.100:19000` to `google.com:80` ...
+2025-03-12T23:08:03.680582Z  INFO 📻 [TCP] Listening on `127.0.0.1:2000`, and routing through `192.168.1.100:19000` to `google.com:80` ...
+2025-03-12T23:08:03.680789Z  INFO ✅ Connected to server `192.168.1.100:19000` ...
+2025-03-12T23:08:03.680903Z  INFO ✅ Sent preamble to server ...
+2025-03-12T23:08:03.681392Z  INFO ✅ Server's signature validated with public key `OLtgafdheGshrj5EzuuS0c30UL2KVZDTaX7N5bSI8Zo` ...
+2025-03-12T23:08:03.681405Z  INFO 🚧 Signing server challenge ...
+2025-03-12T23:08:03.681497Z  INFO ⏳ Awaiting challenge validation ...
+2025-03-12T23:08:03.681740Z  INFO ✅ Challenge accepted!
+2025-03-12T23:08:03.681751Z  INFO ✅ Test connection successful!
 ```
 
 If you want to use encryption, you can specify the `--encrypt` (`-e`) flag.
@@ -145,10 +152,10 @@ The shared secret is used to encrypt the traffic between the client and server a
 ### Tunnel Format
 
 The `host` argument accepts the form `[local_host:[local_port:[remote_host:]]]remote_port`.  This means you could have various scenarios like this:
-- `0.0.0.0:2000:google.com:80`: connects to `google.com:80` and listens on `0.0.0.0:2000`.
-- `2000:google.com:80`: connects to `google.com:80` and listens on `127.0.0.1:2000`.
-- `2000:80`: connects to `server:80` and listens on `127.0.0.1:2000`.
-- `80`: connects to `server:80` and listens on `127.0.0.1:80`.
+- `0.0.0.0:2000:google.com:80`: server connects to `google.com:80` and client listens on `0.0.0.0:2000`.
+- `2000:google.com:80`: server connects to `google.com:80` and client listens on `127.0.0.1:2000`.
+- `2000:80`: server connects to `server:80` (as in, its own `127.0.0.1:80`) and client listens on `127.0.0.1:2000`.
+- `80`: server connects to `server:80` (as in, its own `127.0.0.1:80`) and client listens on `127.0.0.1:80`.
 
 ## Install
 
@@ -179,6 +186,53 @@ Cargo:
 
 ```bash
 $ cargo install ratrod
+```
+
+## Protocol
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant Remote
+
+    Note over Client,Server: Key-Based Authentication & Setup
+    Client->>Server: TCP Connection
+    Client->>Server: ClientPreamble
+    Note right of Client: - Remote address<br>- Ephemeral public key<br>- Challenge nonce<br>- Encryption flag<br>- UDP/TCP flag
+
+    Server->>Server: Verify remote regex matches
+
+    Server->>Client: ServerPreamble
+    Note left of Server: - Server identity public key<br>- Server ephemeral public key<br>- Signed client challenge<br>- Server challenge nonce
+
+    Client->>Client: Verify server signature<br>Check server's public key in known_hosts
+
+    Client->>Server: ClientAuthentication
+    Note right of Client: - Client identity public key<br>- Signed server challenge
+
+    Server->>Server: Verify client signature<br>Check client's public key in authorized_keys
+
+    Server->>Client: HandshakeCompletion
+
+    Note over Client,Server: Optional Encryption Setup
+    alt encryption requested
+        Client->>Client: Generate shared secret from ephemeral keys
+        Server->>Server: Generate shared secret from ephemeral keys
+    end
+
+    Note over Client,Server: Tunnel Establishment
+    alt TCP Tunnel
+        Client->>Client: Accept connections on local_port
+        Client->>Server: Forward data through encrypted channel
+        Server->>Remote: Connect to remote_host:remote_port
+        Server->>Server: Bidirectional copy between client and remote
+    else UDP Tunnel
+        Client->>Client: Bind UDP on local_port
+        Client->>Server: Forward UDP data as ProtocolMessage::UdpData
+        Server->>Remote: Connect UDP to remote_host:remote_port
+        Server->>Server: Activity timeout monitoring
+    end
 ```
 
 ## Testing
