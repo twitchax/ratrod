@@ -7,7 +7,7 @@
 
 # ratrod
 
-A TCP tunneler that uses public / private key authentication with encryption.  Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
+A TCP / UDP tunneler that uses public / private key authentication with encryption.  Basically, it's `ssh -L`.  This is useful for tunneling through a machine that doesn't support SSH.
 
 ## Usage
 
