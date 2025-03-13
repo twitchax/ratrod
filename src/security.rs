@@ -54,7 +54,7 @@ where
 
     let key_file = format!("{}/key", path.as_ref());
 
-    if !std::fs::exists(&key_file)? {
+    if !std::path::Path::new(&key_file).exists() {
         std::fs::write(&key_file, pair.private_key).context("Failed to write private key")?;
         std::fs::write(format!("{}.pub", key_file), pair.public_key).context("Failed to write public key")?;
     }
@@ -62,11 +62,11 @@ where
     let known_hosts_file = format!("{}/known_hosts", path.as_ref());
     let authorized_keys_file = format!("{}/authorized_keys", path.as_ref());
 
-    if !std::fs::exists(&known_hosts_file)? {
+    if !std::path::Path::new(&known_hosts_file).exists() {
         std::fs::write(&known_hosts_file, "").context("Failed to write known hosts")?;
     }
 
-    if !std::fs::exists(&authorized_keys_file)? {
+    if !std::path::Path::new(&authorized_keys_file).exists() {
         std::fs::write(&authorized_keys_file, "").context("Failed to write authorized keys")?;
     }
 
@@ -83,7 +83,7 @@ where
     let path = resolve_keypath(path)?;
     let key_path = format!("{}/key", path);
 
-    if !std::fs::exists(&key_path)? {
+    if !std::path::Path::new(&key_path).exists() {
         info!("No security files present in `{}` ...", path);
 
         print!("Would you like to have the security files (public / private key pair, known hosts, and authorized keys) generated (y/n)? ");

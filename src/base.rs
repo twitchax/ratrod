@@ -42,7 +42,7 @@ impl Constant {
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
     pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
     pub const SIGNATURE_SIZE: usize = 64;
-    pub const UDP_TIMEOUT: Duration = Duration::from_mins(2);
+    pub const UDP_TIMEOUT: Duration = Duration::from_secs(120);
 }
 
 /// A helper for the Shape of the shared secret.

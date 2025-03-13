@@ -34,11 +34,16 @@ pub struct ClientPreamble {
 
 /// Serves as the server's response to the preamble, containing its
 /// public key, its signature of the client's challenge and a challenge.
+/// The server signs the client's challenge to prove its identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerPreamble {
+    /// The server's identity public key (base64 encoded Ed25519 key)
     pub identity_public_key: String,
+    /// The server's ephemeral public key for the key exchange
     pub exchange_public_key: ExchangePublicKey,
+    /// The server's signature of the client's challenge
     pub signature: SerializeableSignature,
+    /// A random challenge for the client to sign
     pub challenge: Challenge,
 }
 
@@ -122,6 +127,9 @@ impl Display for ProtocolError {
 
 impl ProtocolError {
     /// Sends the error message and shuts down the stream.
+    ///
+    /// The generic parameter R represents the return type expected by the calling function.
+    /// This method always returns an error, but needs to have the expected return type for the context.
     pub async fn send_and_bail<T, R>(self, stream: &mut T) -> Res<R>
     where
         T: BincodeSend,
@@ -140,7 +148,9 @@ impl ProtocolError {
 /// A trait for sending protocol messages over a stream.
 ///
 /// This impl is designed to ensure that the push method can only be used to send
-/// [`ProtocolMessage`] messages.
+/// [`ProtocolMessage`] messages. This restriction is important for type safety
+/// and to ensure that all messages sent through the stream follow the protocol
+/// format and are properly encrypted if necessary.
 pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpin + Sized {
     fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void> {
         async move { self.send(message).await.map_err(|_| Err::msg("Failed to send message")) }
@@ -150,7 +160,8 @@ pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpi
 /// A trait for receiving protocol messages over a stream.
 ///
 /// This impl is designed to ensure that the pull method can only be used to receive
-/// [`ProtocolMessage`] messages.
+/// [`ProtocolMessage`] messages. This restriction provides type safety and ensures
+/// proper message decryption and protocol handling for incoming data.
 pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + AsyncReadExt + Unpin + Sized {
     fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>> {
         async move {
@@ -167,7 +178,7 @@ impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolM
 
 // Signature serialization.
 
-/// A helper type for serializing signatures (bincode cannot serialize a `[u8; 64]` our of the box).
+/// A helper type for serializing signatures (bincode cannot serialize a `[u8; 64]` out of the box).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerializeableSignature(pub Signature);
 

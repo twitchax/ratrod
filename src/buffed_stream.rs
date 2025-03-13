@@ -70,7 +70,7 @@ macro_rules! pinned_read_stream {
     };
 }
 
-/// Macro to take a `Pin<&mut BuffedStream<T>>` and return the decryption stream `Pin<&mut BufReader<SimplexStream>>`.
+/// Macro to take a `Pin<&mut BuffedStreamReadHalf<T>>` and return the decryption stream `Pin<&mut SimplexStream>`.
 macro_rules! take_pinned_read_stream {
     ($self:ident) => {
         Pin::new($self.get_mut().read_stream.as_mut().unwrap())
@@ -96,7 +96,9 @@ pub type BuffedDuplexStream = BuffedStream<ReadHalf<DuplexStream>, WriteHalf<Dup
 /// The `shared_secret` field is used to encrypt and decrypt data.
 /// The `read_stream` field is used to buffer data that has been decrypted.
 pub struct BuffedStream<R, W> {
+    /// The read half of the buffered stream
     inner_read: BuffedStreamReadHalf<R>,
+    /// The write half of the buffered stream
     inner_write: BuffedStreamWriteHalf<W>,
 }
 
@@ -114,6 +116,10 @@ impl<R, W> BuffedStream<R, W> {
         self
     }
 
+    /// Splits the buffered stream into its read and write halves.
+    ///
+    /// This allows the read and write halves to be used independently, potentially
+    /// from different tasks or threads.
     pub fn into_split(self) -> (BuffedStreamReadHalf<R>, BuffedStreamWriteHalf<W>) {
         (self.inner_read, self.inner_write)
     }
@@ -313,8 +319,8 @@ where
         }
 
         // Use the "self" reader to get the next packet (and perform any needed decryption).
-        // TODO: We could actually loop on poll next here until we either get a pending, or we no longer have space in the
-        // read stream.
+        // Performance optimization opportunity: We could loop on poll_next here until we either 
+        // get Poll::Pending, or we no longer have space in the read_stream buffer.
         let result = self.as_mut().poll_next(cx);
 
         match result {

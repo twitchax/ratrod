@@ -22,12 +22,16 @@ use crate::{
     protocol::{Challenge, ExchangePublicKey, Signature},
 };
 
+/// Generates a random alphanumeric string of the specified length.
+///
+/// This is used for creating unique identifiers, such as connection IDs.
 pub fn random_string(len: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
 }
 
 pub fn generate_key_pair() -> Res<Base64KeyPair> {
     let rng = SystemRandom::new();
+    // Generate Ed25519 key pair in PKCS#8 format
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).context("Unable to generate key pair")?;
 
     let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).context("Failed to create key pair")?;

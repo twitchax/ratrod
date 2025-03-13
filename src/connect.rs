@@ -357,7 +357,7 @@ async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
 /// Handles a new UDP connection.
 async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data_receiver: UnboundedReceiver<Vec<u8>>, remote_address: String, config: Config) {
     let id = random_string(6);
-    let span = info_span!("tcp", id = id);
+    let span = info_span!("udp", id = id);
 
     let result: Void = async move {
         // Connect.
@@ -371,7 +371,8 @@ async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data
         let client_socket_clone = client_socket.clone();
         let (mut remote_read, mut remote_write) = server.into_split();
 
-        // TODO: Figure out logic below to get them to disconnect?
+        // Connection will be closed automatically when either client side disconnects or 
+        // when the server detects inactivity timeout. No explicit disconnect logic needed here.
 
         let pump_up: JoinHandle<Void> = tokio::spawn(async move {
             while let Some(data) = data_receiver.recv().await {
@@ -501,10 +502,10 @@ pub mod tests {
         let key_path = "test/client";
         let connect_address = "connect_address";
         let tunnel_definitions = ["localhost:5000:example.com:80", "127.0.0.1:6000:api.example.com:443"];
-        let accrpt_all_hosts = false;
+        let accept_all_hosts = false;
         let should_encrypt = false;
 
-        let instance = Instance::prepare(key_path.to_owned(), connect_address, &tunnel_definitions, accrpt_all_hosts, should_encrypt).unwrap();
+        let instance = Instance::prepare(key_path.to_owned(), connect_address, &tunnel_definitions, accept_all_hosts, should_encrypt).unwrap();
 
         // Verify config
         assert_eq!(instance.config.connect_address, connect_address);
