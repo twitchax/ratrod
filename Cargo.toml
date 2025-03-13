@@ -1,6 +1,6 @@
 [package]
 name = "ratrod"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["Aaron Roney <twitchax@gmail.com>"]
 description = "A TCP / UDP tunneler that uses public / private key authentication with encryption."
