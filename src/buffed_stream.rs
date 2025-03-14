@@ -26,7 +26,7 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     base::{Constant, SharedSecret},
@@ -448,7 +448,6 @@ where
         // Basically, this is an optimization that both `poll_read` and `poll_write` can use for
         // the case where we are not encrypting the stream.
         if self.shared_secret.is_none() {
-            debug!("Writing unencrypted data to inner stream:\n{}", String::from_utf8_lossy(buf));
             return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
         }
 
