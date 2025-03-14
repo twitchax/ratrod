@@ -27,11 +27,11 @@ impl Constant {
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
     pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
     pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
-    pub const BUFFER_SIZE: usize = 8192;
+    pub const BUFFER_SIZE: usize = 16384 + Constant::ENCRYPTION_OVERHEAD;
     pub const CHALLENGE_SIZE: usize = 32;
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
     pub const DELIMITER_SIZE: usize = 8;
-    pub const ENCRYPTION_OVERHEAD: usize = Self::SHARED_SECRET_NONCE_SIZE + Self::SHARED_SECRET_TAG_SIZE + Self::DELIMITER_SIZE;
+    pub const ENCRYPTION_OVERHEAD: usize = 256;
     pub const IDENTITY_PRIVATE_KEY_LENGTH: usize = 111;
     pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 43;
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
