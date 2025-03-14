@@ -168,11 +168,19 @@ impl<R> BuffedStream<R, OwnedWriteHalf> {
     pub fn as_inner_tcp_write_ref(&self) -> &OwnedWriteHalf {
         self.inner_write.inner.get_ref()
     }
+
+    pub fn as_inner_tcp_write_mut(&mut self) -> &mut OwnedWriteHalf {
+        self.inner_write.inner.get_mut()
+    }
 }
 
 impl<W> BuffedStream<OwnedReadHalf, W> {
     pub fn as_inner_tcp_read_ref(&self) -> &OwnedReadHalf {
         self.inner_read.inner.get_ref()
+    }
+
+    pub fn as_inner_tcp_read_mut(&mut self) -> &mut OwnedReadHalf {
+        self.inner_read.inner.get_mut()
     }
 }
 

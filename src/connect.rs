@@ -212,7 +212,10 @@ async fn server_connect(connect_address: &str) -> Res<TcpStream> {
 /// Establishes the e2e connection with server.
 async fn connect(config: &Config, remote_address: &str, is_udp: bool) -> Res<BuffedTcpStream> {
     // Connect to the server.
-    let mut server = BuffedTcpStream::from(server_connect(&config.connect_address).await?);
+    let server = server_connect(&config.connect_address).await?;
+    server.set_nodelay(true)?;
+
+    let mut server = BuffedTcpStream::from(server);
 
     // Handle the handshake.
     let handshake_data = handle_handshake(&mut server, config, remote_address, is_udp).await.context("Error handling handshake")?;
@@ -274,6 +277,8 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
         // Handle the TCP pump.
 
         info!("⛽ Pumping data between client and remote ...");
+
+        local.set_nodelay(true)?;
 
         handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
 
