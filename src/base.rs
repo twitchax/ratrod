@@ -27,7 +27,7 @@ impl Constant {
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
     pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
     pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
-    pub const BUFFER_SIZE: usize = 1 * 1024 + Constant::ENCRYPTION_OVERHEAD;
+    pub const BUFFER_SIZE: usize = 32 * 1024 + Constant::ENCRYPTION_OVERHEAD;
     pub const CHALLENGE_SIZE: usize = 32;
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
     pub const DELIMITER_SIZE: usize = 8;

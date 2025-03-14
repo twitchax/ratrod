@@ -240,10 +240,29 @@ where
 
     let pumps = futures::future::select(left, right);
 
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(240),
         pumps
     ).await?;
+
+    let r = match result {
+        Either::Left((Ok(a), _)) => {
+            let bytes = a.unwrap_or(0);
+            info!("⬅️ {} bytes", bytes);
+            Ok((bytes, 0))
+        }
+        Either::Right((Ok(b), _)) => {
+            let bytes = b.unwrap_or(0);
+            info!("➡️ {} bytes", bytes);
+            Ok((0, bytes))
+        }
+        Either::Left((Err(e), _)) => {
+            Err(e)
+        }
+        Either::Right((Err(e), _)) => {
+            Err(e)
+        }
+    };
 
     Ok((0, 0))
 }
