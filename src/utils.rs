@@ -211,8 +211,20 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
+    //let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
+    //info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
+
+    let (mut read_a, mut write_a) = tokio::io::split(a);
+    let (mut read_b, mut write_b) = tokio::io::split(b);
+
+    let (left, right) = tokio::join!(
+        tokio::io::copy(&mut read_a, &mut write_b),
+        tokio::io::copy(&mut read_b, &mut write_a),
+    );
+
+    let result = (left?, right?);
+    
     info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
 
     Ok(result)
