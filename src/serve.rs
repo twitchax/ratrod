@@ -213,6 +213,8 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
             .await;
     };
 
+    remote.set_nodelay(true)?;
+
     info!("✅ Connected to remote server `{}`.", remote_address);
 
     handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
@@ -315,13 +317,14 @@ async fn run_tcp_server(config: Config) -> Void {
 /// This is used to handle the TCP connection between the client and server.
 /// It handles the handshake, and pumps data between the client and server.
 async fn handle_connection(client: TcpStream, config: Config) {
-    let mut client = BuffedTcpStream::from(client);
-
     let id = random_string(6);
     let span = info_span!("conn", id = id);
 
     let result: Void = async move {
-        let peer_addr = client.as_inner_tcp_write_ref().peer_addr().context("Error getting peer address")?;
+        client.set_nodelay(true)?;
+        let peer_addr = client.peer_addr().context("Error getting peer address")?;
+
+        let mut client = BuffedTcpStream::from(client);
 
         info!("✅ Accepted connection from `{}`.", peer_addr);
 
