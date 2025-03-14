@@ -9,6 +9,7 @@ use anyhow::Context;
 use base64::Engine;
 use futures::future::Either;
 use rand::{Rng, distr::Alphanumeric};
+use regex::bytes;
 use ring::{
     aead::{Aad, LessSafeKey, Nonce, UnboundKey},
     agreement::{EphemeralPrivateKey, agree_ephemeral},
@@ -246,25 +247,33 @@ where
     ).await?;
 
     let r = match result {
-        Either::Left((Ok(a), _)) => {
-            let bytes = a.unwrap_or(0);
-            info!("⬅️ {} bytes", bytes);
-            Ok((bytes, 0))
+        Either::Left((Ok(a_result), other)) => {
+            let bytes_right = a_result?;
+            info!("➡️  {} bytes", bytes_right);
+            
+            let bytes_left = other.await??;
+            info!("⬅️  {} bytes", bytes_left);
+
+            (bytes_left, bytes_right)
         }
-        Either::Right((Ok(b), _)) => {
-            let bytes = b.unwrap_or(0);
-            info!("➡️ {} bytes", bytes);
-            Ok((0, bytes))
+        Either::Right((Ok(b_result), other)) => {
+            let bytes_left = b_result?;
+            info!("⬅️  {} bytes", bytes_left);
+
+            let bytes_right = other.await??;
+            info!("➡️  {} bytes", bytes_right);
+
+            (bytes_left, bytes_right)
         }
         Either::Left((Err(e), _)) => {
-            Err(e)
+            Err(e)?
         }
         Either::Right((Err(e), _)) => {
-            Err(e)
+            Err(e)?
         }
     };
 
-    Ok((0, 0))
+    Ok(r)
 }
 
 #[cfg(test)]
