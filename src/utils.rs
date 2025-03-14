@@ -18,7 +18,7 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair},
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, task::JoinHandle};
 use tracing::{debug, info};
 
 use crate::{
@@ -232,11 +232,36 @@ where
     let (mut read_a, mut write_a) = tokio::io::split(a);
     let (mut read_b, mut write_b) = tokio::io::split(b);
 
-    let left = tokio::spawn(async move {
-        tokio::io::copy(&mut read_a, &mut write_b).await
+    let left: JoinHandle<Res<u64>> = tokio::spawn(async move {
+        //tokio::io::copy(&mut read_a, &mut write_b).await
+        let buf = &mut [0u8; Constant::BUFFER_SIZE];
+        let mut count = 0;
+        loop {
+            let n = read_a.read(buf).await?;
+            if n == 0 {
+                break;
+            }
+            write_b.write_all(&buf[..n]).await?;
+            count += n as u64;
+        }
+
+        Ok(count)
     });
-    let right = tokio::spawn(async move {
-        tokio::io::copy(&mut read_b, &mut write_a).await
+    
+    let right: JoinHandle<Res<u64>> = tokio::spawn(async move {
+        //tokio::io::copy(&mut read_b, &mut write_a).await
+        let buf = &mut [0u8; Constant::BUFFER_SIZE];
+        let mut count = 0;
+        loop {
+            let n = read_b.read(buf).await?;
+            if n == 0 {
+                break;
+            }
+            write_a.write_all(&buf[..n]).await?;
+            count += n as u64;
+        }
+
+        Ok(count)
     });
 
     let pumps = futures::future::select(left, right);
