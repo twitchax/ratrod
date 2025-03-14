@@ -238,9 +238,9 @@ where
         let mut count = 0;
         loop {
             let n = read_a.read(buf).await?;
-            if n == 0 {
-                break;
-            }
+            // if n == 0 {
+            //     break;
+            // }
             write_b.write_all(&buf[..n]).await?;
             count += n as u64;
         }
@@ -254,9 +254,9 @@ where
         let mut count = 0;
         loop {
             let n = read_b.read(buf).await?;
-            if n == 0 {
-                break;
-            }
+            // if n == 0 {
+            //     break;
+            // }
             write_a.write_all(&buf[..n]).await?;
             count += n as u64;
         }
