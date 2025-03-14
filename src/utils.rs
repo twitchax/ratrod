@@ -240,7 +240,7 @@ where
     let tx_task = tokio::spawn(async move {
         let result = copy_with_counter(&mut read_a, &mut write_b, tx_counter_clone).await;
         // Only shutdown write direction when read completes
-        let _ = write_b.shutdown().await;
+        //let _ = write_b.shutdown().await;
         result
     });
     
@@ -255,7 +255,7 @@ where
     let (tx_result, rx_result) = tokio::join!(tx_task, rx_task);
 
     tx_result??;
-    rx_result?;
+    rx_result??;
     
     Ok((tx_counter.load(Ordering::Relaxed), rx_counter.load(Ordering::Relaxed)))
 }
