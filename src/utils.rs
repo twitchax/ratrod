@@ -3,6 +3,8 @@
 //! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
 //! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
 
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+
 use anyhow::Context;
 use base64::Engine;
 use rand::{Rng, distr::Alphanumeric};
@@ -14,7 +16,7 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair},
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::{
@@ -206,16 +208,83 @@ where
     tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
 }
 
+// pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
+// where
+//     A: AsyncRead + AsyncWrite + Unpin,
+//     B: AsyncRead + AsyncWrite + Unpin,
+// {
+//     let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
+
+//     info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
+
+//     Ok(result)
+// }
+
 pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
 where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
+    A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
+    let a = unsafe { std::mem::transmute::<&mut A, &'static mut A>(a) };
+    let b = unsafe { std::mem::transmute::<&mut B, &'static mut B>(b) };
 
-    info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
+    let (mut read_a, mut write_a) = tokio::io::split(a);
+    let (mut read_b, mut write_b) = tokio::io::split(b);
+    
+    // Track counters separately
+    let (tx_counter, rx_counter) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let tx_counter_clone = tx_counter.clone();
+    let rx_counter_clone = rx_counter.clone();
+    
+    // Use separate tasks for each direction
+    let tx_task = tokio::spawn(async move {
+        let result = copy_with_counter(&mut read_a, &mut write_b, tx_counter_clone).await;
+        // Only shutdown write direction when read completes
+        //let _ = write_b.shutdown().await;
+        result
+    });
+    
+    let rx_task = tokio::spawn(async move {
+        let result = copy_with_counter(&mut read_b, &mut write_a, rx_counter_clone).await;
+        // Only shutdown write direction when read completes
+        //let _ = write_a.shutdown().await;
+        result
+    });
+    
+    // Wait for both tasks but don't terminate early
+    let (tx_result, rx_result) = tokio::join!(tx_task, rx_task);
 
-    Ok(result)
+    tx_result??;
+    rx_result??;
+    
+    let left = tx_counter.load(Ordering::Relaxed);
+    let right = rx_counter.load(Ordering::Relaxed);
+
+    info!("⬅️ {} bytes ➡️ {} bytes", left, right);
+    
+    Ok((left, right))
+}
+
+async fn copy_with_counter<R, W>(reader: &mut R, writer: &mut W, counter: Arc<AtomicU64>) -> Void
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    // Larger buffer to capture full HTTP/2 frames (16KB is common for HTTP/2)
+    let mut buf = vec![0; 32768]; 
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e.into()),
+        };
+        
+        // Write in one operation to preserve frame boundaries
+        writer.write_all(&buf[..n]).await?;
+        counter.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
