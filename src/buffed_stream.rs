@@ -13,6 +13,7 @@ use std::{
     task::{Context, Poll, ready},
 };
 
+use anyhow::Context as _;
 use async_bincode::{
     AsyncDestination,
     tokio::{AsyncBincodeReader, AsyncBincodeWriter},
@@ -29,7 +30,7 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    base::{Constant, SharedSecret},
+    base::{Constant, Res, SharedSecret},
     protocol::{ProtocolMessage, ProtocolMessageWrapper},
     utils::{decrypt, encrypt},
 };
@@ -184,6 +185,15 @@ impl<W> BuffedStream<OwnedReadHalf, W> {
     }
 }
 
+impl BuffedStream<OwnedReadHalf, OwnedWriteHalf> {
+    pub fn take(self) -> Res<TcpStream> {
+        let read = self.inner_read.take();
+        let write = self.inner_write.take();
+
+        read.reunite(write).context("Failed to reunite read and write halves")
+    }
+}
+
 // Trait impls.
 
 impl<R, W> Stream for BuffedStream<R, W>
@@ -268,6 +278,10 @@ where
             shared_secret: None,
             read_stream: None,
         }
+    }
+
+    fn take(self) -> T {
+        self.inner.into_inner()
     }
 }
 
@@ -393,6 +407,10 @@ where
             inner: AsyncBincodeWriter::from(stream).for_async(),
             shared_secret: None,
         }
+    }
+
+    fn take(self) -> T {
+        self.inner.into_inner()
     }
 }
 

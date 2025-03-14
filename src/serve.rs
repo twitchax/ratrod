@@ -217,7 +217,7 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
+    handle_pump(&mut client.take()?, &mut remote).await.context("Error handling TCP pump.")?;
 
     Ok(())
 }

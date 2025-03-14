@@ -280,7 +280,7 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         local.set_nodelay(true)?;
 
-        handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
+        handle_pump(&mut local, &mut server.take()?).await.context("Error handling pump")?;
 
         info!("✅ Connection closed.");
 
