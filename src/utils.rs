@@ -247,7 +247,7 @@ where
     let rx_task = tokio::spawn(async move {
         let result = copy_with_counter(&mut read_b, &mut write_a, rx_counter_clone).await;
         // Only shutdown write direction when read completes
-        let _ = write_a.shutdown().await;
+        //let _ = write_a.shutdown().await;
         result
     });
     
