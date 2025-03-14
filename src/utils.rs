@@ -3,8 +3,11 @@
 //! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
 //! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
 
+use std::time::Duration;
+
 use anyhow::Context;
 use base64::Engine;
+use futures::future::Either;
 use rand::{Rng, distr::Alphanumeric};
 use ring::{
     aead::{Aad, LessSafeKey, Nonce, UnboundKey},
@@ -215,13 +218,27 @@ where
 
     // info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
 
+    // Ok(result)
+
     let (mut read_a, mut write_a) = tokio::io::split(a);
     let (mut read_b, mut write_b) = tokio::io::split(b);
 
-    let result = tokio::select! {
-        r = tokio::io::copy(&mut read_a, &mut write_b) => r?,
-        r = tokio::io::copy(&mut read_b, &mut write_a) => r?,
-    };
+    let left = tokio::io::copy(&mut read_a, &mut write_b);
+    let right = tokio::io::copy(&mut read_b, &mut write_a);
+    let timeout = tokio::time::sleep(Duration::from_secs(120));
+
+    tokio::pin!(left);
+    tokio::pin!(right);
+    tokio::pin!(timeout);
+
+    let pumps = futures::future::select(left, right);
+
+    match futures::future::select(pumps, timeout).await {
+        Either::Left(_) => {},
+        Either::Right((_, _)) => {
+            return Err(Err::msg("Timeout while waiting for data transfer"));
+        }
+    }
 
     Ok((0, 0))
 }
