@@ -26,6 +26,7 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
 };
+use tracing::warn;
 
 use crate::{
     base::{Constant, SharedSecret},
@@ -451,9 +452,15 @@ where
         }
 
         // First, we need to pare down the data to the maximum size of the encrypted packet, if needed.
+        let original_size = buf.len();
         let max_size = Constant::BUFFER_SIZE - Constant::ENCRYPTION_OVERHEAD;
-        let amt = std::cmp::min(buf.len(), max_size);
+
+        let amt = std::cmp::min(original_size, max_size);
         let buf = &buf[..amt];
+
+        if amt == max_size {
+            warn!("Buffer ({}) was too large for the encrypted packet, and was not completely written", original_size);
+        }
 
         let message = ProtocolMessage::Data(buf.to_vec());
 
@@ -464,7 +471,7 @@ where
 
         // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
         // This allows the caller to know how much of _their_ data was written, which is all that matters.
-        Poll::Ready(Ok(buf.len()))
+        Poll::Ready(Ok(amt))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
