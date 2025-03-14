@@ -211,8 +211,8 @@ where
 
 pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
 where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
+    A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
@@ -220,25 +220,30 @@ where
 
     // Ok(result)
 
+    let a = unsafe {
+        std::mem::transmute::<&mut A, &'static mut A>(a)
+    };
+
+    let b = unsafe {
+        std::mem::transmute::<&mut B, &'static mut B>(b)
+    };
+
     let (mut read_a, mut write_a) = tokio::io::split(a);
     let (mut read_b, mut write_b) = tokio::io::split(b);
 
-    let left = tokio::io::copy(&mut read_a, &mut write_b);
-    let right = tokio::io::copy(&mut read_b, &mut write_a);
-    let timeout = tokio::time::sleep(Duration::from_secs(120));
-
-    tokio::pin!(left);
-    tokio::pin!(right);
-    tokio::pin!(timeout);
+    let left = tokio::spawn(async move {
+        tokio::io::copy(&mut read_a, &mut write_b).await
+    });
+    let right = tokio::spawn(async move {
+        tokio::io::copy(&mut read_b, &mut write_a).await
+    });
 
     let pumps = futures::future::select(left, right);
 
-    match futures::future::select(pumps, timeout).await {
-        Either::Left(_) => {},
-        Either::Right((_, _)) => {
-            return Err(Err::msg("Timeout while waiting for data transfer"));
-        }
-    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        pumps
+    ).await?;
 
     Ok((0, 0))
 }
