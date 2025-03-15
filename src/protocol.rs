@@ -72,6 +72,7 @@ pub enum ProtocolMessage {
     Data(Vec<u8>),
     UdpData(Vec<u8>),
     Error(ProtocolError),
+    Shutdown,
 }
 
 impl ProtocolMessage {
@@ -165,7 +166,11 @@ pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpi
 pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + AsyncReadExt + Unpin + Sized {
     fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>> {
         async move {
-            let message = self.next().await.context("Failed to read message")?.context("Failed to parse message")?;
+            let message = match self.next().await {
+                Some(Ok(message)) => message,
+                Some(Err(e)) => return Err(Err::msg(format!("Failed to receive message: {}", e))),
+                None => ProtocolMessage::Shutdown,
+            };
             Ok(message)
         }
     }

@@ -233,8 +233,10 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
     let b_to_a: JoinHandle<Res<u64>> = tokio::spawn(async move {
         let mut count = 0;
         loop {
-            let ProtocolMessage::Data(data) = read_b.pull().await? else {
-                return Err(Err::msg("Failed to read data in pump (wrong type)"));
+            let data = match read_b.pull().await? {
+                ProtocolMessage::Data(data) => data,
+                ProtocolMessage::Shutdown => break,
+                _ => return Err(Err::msg("Failed to read data in pump (wrong type)")),
             };
 
             if data.is_empty() {
