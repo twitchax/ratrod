@@ -280,8 +280,6 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         local.set_nodelay(true)?;
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
         handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
 
         let _ = local.shutdown().await;

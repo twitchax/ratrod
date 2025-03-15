@@ -282,7 +282,7 @@ where
 
     fn take(self) -> T {
         if !self.inner.buffer().is_empty() {
-            warn!("BuffedStreamReadHalf was not empty when taking the stream");
+            warn!("Buffer was not empty when taking the stream");
         }
 
         self.inner.into_inner()
@@ -341,9 +341,9 @@ where
         //
         // Basically, this is an optimization that both `poll_read` and `poll_write` can use for
         // the case where we are not encrypting the stream.
-        if self.shared_secret.is_none() {
-            return Pin::new(self.inner.get_mut()).poll_read(cx, buf);
-        }
+        // if self.shared_secret.is_none() {
+        //     return Pin::new(self.inner.get_mut()).poll_read(cx, buf);
+        // }
 
         // Use the "self" reader to get the next packet (and perform any needed decryption).
         // Performance optimization opportunity: We could loop on poll_next here until we either 
@@ -477,9 +477,9 @@ where
         //
         // Basically, this is an optimization that both `poll_read` and `poll_write` can use for
         // the case where we are not encrypting the stream.
-        if self.shared_secret.is_none() {
-            return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
-        }
+        // if self.shared_secret.is_none() {
+        //     return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
+        // }
 
         // First, we need to pare down the data to the maximum size of the encrypted packet, if needed.
         let original_size = buf.len();
