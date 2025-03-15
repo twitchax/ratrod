@@ -276,7 +276,7 @@ where
         Self {
             inner: AsyncBincodeReader::from(stream),
             shared_secret: None,
-            read_stream: None,
+            read_stream: Some(SimplexStream::new_unsplit(Constant::BUFFER_SIZE)),
         }
     }
 
