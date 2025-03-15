@@ -359,19 +359,31 @@ where
                     )));
                 };
 
-                // We have the data, so we can write it to the `read_stream`.
-                let written = ready!(pinned_read_stream!(self).poll_write(cx, &data)?);
-
-                // Fail if the interim buffer is too small.
-                if written < data.len() {
+                if buf.remaining() < data.len() {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
+                        "Buffer is too small to hold the decrypted data",
                     )));
                 }
 
-                // Flush the `read_stream` to ensure that the data is available for reading (see below).
-                ready!(pinned_read_stream!(self).poll_flush(cx)?);
+                buf.initialize_unfilled_to(data.len());
+                buf.put_slice(&data);
+
+                return Poll::Ready(Ok(()));
+
+                // // We have the data, so we can write it to the `read_stream`.
+                // let written = ready!(pinned_read_stream!(self).poll_write(cx, &data)?);
+
+                // // Fail if the interim buffer is too small.
+                // if written < data.len() {
+                //     return Poll::Ready(Err(std::io::Error::new(
+                //         std::io::ErrorKind::InvalidData,
+                //         "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
+                //     )));
+                // }
+
+                // // Flush the `read_stream` to ensure that the data is available for reading (see below).
+                // ready!(pinned_read_stream!(self).poll_flush(cx)?);
             }
             Poll::Ready(Some(Err(e))) => {
                 // This is the case where we have a bincode error, so we should return the error.
@@ -383,17 +395,21 @@ where
                 // so we should shutdown the write side of the `decryption_stream`, and
                 // return the final poll result (bottom of function).
 
-                ready!(pinned_read_stream!(self).poll_shutdown(cx)?);
+                //ready!(pinned_read_stream!(self).poll_shutdown(cx)?);
+
+                return Poll::Pending;
             }
             Poll::Pending => {
                 // If we are pending, then we should pass through to the underlying decryption stream (so do nothing here).
                 // The underlying decryption stream will be properly shutdown in the case of a shutdown on the inner stream.
+
+                return Poll::Pending;
             }
         }
 
         // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the
         // decrypted stream, so we just offload onto its `poll_read` method.
-        take_pinned_read_stream!(self).poll_read(cx, buf)
+        //take_pinned_read_stream!(self).poll_read(cx, buf)
     }
 }
 
