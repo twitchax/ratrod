@@ -156,6 +156,18 @@ pub trait BincodeSend: Sink<ProtocolMessage> + Unpin + Sized {
     fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void> {
         async move { self.send(message).await.map_err(|_| Err::msg("Failed to send message")) }
     }
+
+    fn push_all(&mut self, messages: impl IntoIterator<Item = ProtocolMessage>) -> impl Future<Output = Void> {
+        async move {
+            for message in messages.into_iter() {
+                self.feed(message).await.map_err(|_| Err::msg("Failed to feed message"))?;
+            }
+            
+            self.flush().await.map_err(|_| Err::msg("Failed to flush"))?;
+
+            Ok(())
+        }
+    }
 }
 
 /// A trait for receiving protocol messages over a stream.

@@ -19,7 +19,7 @@ use ring::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, task::JoinHandle};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void}, buffed_stream::BuffedTcpStream, protocol::{BincodeReceive, BincodeSend, Challenge, ExchangePublicKey, ProtocolMessage, Signature}
@@ -224,10 +224,14 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
             }
 
             if n > Constant::BUFFER_SIZE {
-                return Err(Err::msg("Buffer overflow"));
-            }
+                warn!("Buffer overflow ({}): splitting packets", n);
 
-            write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
+                let chunks = buf.chunks(Constant::BUFFER_SIZE).map(|c| ProtocolMessage::Data(c.to_vec())).collect::<Vec<_>>();
+                write_b.push_all(chunks).await?;
+            } else {
+                write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
+            }
+            
             count += n as u64;
         }
 
