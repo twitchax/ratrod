@@ -370,7 +370,7 @@ where
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         take_pinned_inner!(self)
             .poll_ready(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to make ready inner stream: {}", e)))
     }
 
     fn start_send(self: Pin<&mut Self>, item: ProtocolMessage) -> Result<(), Self::Error> {
