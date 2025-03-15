@@ -242,6 +242,7 @@ where
             //     break;
             // }
             write_b.write_all(&buf[..n]).await?;
+            write_b.flush().await?;
             count += n as u64;
         }
 
@@ -258,6 +259,7 @@ where
             //     break;
             // }
             write_a.write_all(&buf[..n]).await?;
+            write_a.flush().await?;
             count += n as u64;
         }
 
