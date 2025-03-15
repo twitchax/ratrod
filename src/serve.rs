@@ -214,6 +214,8 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
 
     let _ = remote.shutdown().await;

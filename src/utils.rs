@@ -212,12 +212,12 @@ where
 
 pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
 where
-    A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
 {
     let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
-    info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
+    info!("⬅️  {} bytes ➡️  {} bytes", result.1, result.0);
 
     Ok(result)
 
