@@ -19,7 +19,7 @@ use crate::{
     buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ExchangePublicKey, ProtocolMessage},
     security::{resolve_keypath, resolve_known_hosts, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, handle_pump_2, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -280,10 +280,7 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         local.set_nodelay(true)?;
 
-        handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
-
-        let _ = local.shutdown().await;
-        let _ = server.take()?.shutdown().await;
+        handle_pump_2(local, server).await.context("Error handling pump")?;
 
         info!("✅ Connection closed.");
 

@@ -3,11 +3,11 @@
 //! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
 //! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
 
-use std::time::Duration;
+use std::{time::Duration};
 
 use anyhow::Context;
 use base64::Engine;
-use futures::future::Either;
+use futures::{future::Either, SinkExt};
 use rand::{Rng, distr::Alphanumeric};
 use regex::bytes;
 use ring::{
@@ -18,12 +18,11 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair},
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, task::JoinHandle};
+use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, task::JoinHandle};
 use tracing::{debug, info};
 
 use crate::{
-    base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void},
-    protocol::{Challenge, ExchangePublicKey, Signature},
+    base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void}, buffed_stream::BuffedTcpStream, protocol::{BincodeReceive, BincodeSend, Challenge, ExchangePublicKey, ProtocolMessage, Signature}
 };
 
 /// Generates a random alphanumeric string of the specified length.
@@ -208,6 +207,77 @@ where
     T: AsRef<str>,
 {
     tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
+}
+
+pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> {
+    let (mut read_a, mut write_a) = a.into_split();
+    let (mut read_b, mut write_b) = b.into_split();
+
+    let a_to_b: JoinHandle<Res<u64>> = tokio::spawn(async move {
+        let buf = &mut [0u8; Constant::BUFFER_SIZE];
+        let mut count = 0;
+        loop {
+            let n = read_a.read(buf).await?;
+
+            if n == 0 {
+                break;
+            }
+
+            write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
+            count += n as u64;
+        }
+
+        Ok(count)
+    });
+    
+    let b_to_a: JoinHandle<Res<u64>> = tokio::spawn(async move {
+        let mut count = 0;
+        loop {
+            let ProtocolMessage::Data(data) = read_b.pull().await? else {
+                return Err(Err::msg("Failed to read data in pump (wrong type)"));
+            };
+
+            if data.is_empty() {
+                break;
+            }
+
+            write_a.write_all(&data).await?;
+            write_a.flush().await?;
+            count += data.len() as u64;
+        }
+
+        Ok(count)
+    });
+
+    let pumps = futures::future::select(b_to_a, a_to_b);
+
+    let result = tokio::time::timeout(
+        Constant::UDP_TIMEOUT,
+        pumps,
+    ).await?;
+
+    match result {
+        Either::Left((Ok(a_result), other)) => {
+            let bytes_right = a_result?;
+            info!("➡️  {} bytes", bytes_right);
+
+            let bytes_left = other.await??;
+            info!("⬅️  {} bytes", bytes_left);
+
+            Ok((bytes_left, bytes_right))
+        }
+        Either::Right((Ok(b_result), other)) => {
+            let bytes_left = b_result?;
+            info!("⬅️  {} bytes", bytes_left);
+
+            let bytes_right = other.await??;
+            info!("➡️  {} bytes", bytes_right);
+
+            Ok((bytes_left, bytes_right))
+        }
+        Either::Left((Err(e), _)) => Err(e)?,
+        Either::Right((Err(e), _)) => Err(e)?,
+    }
 }
 
 pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>

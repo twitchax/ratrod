@@ -15,7 +15,7 @@ use crate::{
     buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientPreamble, ProtocolError, ProtocolMessage, ServerPreamble, Signature},
     security::{resolve_authorized_keys, resolve_keypath, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, handle_pump_2, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -214,10 +214,7 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
-
-    let _ = remote.shutdown().await;
-    let _ = client.take()?.shutdown().await;
+    handle_pump_2(remote, client).await.context("Error handling TCP pump.")?;
 
     Ok(())
 }
