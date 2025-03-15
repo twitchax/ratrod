@@ -397,7 +397,7 @@ where
 
                 //ready!(pinned_read_stream!(self).poll_shutdown(cx)?);
 
-                return Poll::Pending;
+                return Poll::Ready(Ok(()));
             }
             Poll::Pending => {
                 // If we are pending, then we should pass through to the underlying decryption stream (so do nothing here).
