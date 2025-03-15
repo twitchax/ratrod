@@ -214,7 +214,7 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
     let (mut read_b, mut write_b) = b.into_split();
 
     let a_to_b: JoinHandle<Res<u64>> = tokio::spawn(async move {
-        let buf = &mut [0u8; Constant::BUFFER_SIZE];
+        let buf = &mut [0u8; 64 * 1024];
         let mut count = 0;
         loop {
             let n = read_a.read(buf).await?;
