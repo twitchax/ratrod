@@ -281,6 +281,10 @@ where
     }
 
     fn take(self) -> T {
+        if !self.inner.buffer().is_empty() {
+            warn!("BuffedStreamReadHalf was not empty when taking the stream");
+        }
+
         self.inner.into_inner()
     }
 }
