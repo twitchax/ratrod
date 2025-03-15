@@ -8,7 +8,7 @@ use anyhow::Context;
 use futures::join;
 use secrecy::SecretString;
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket}, select, sync::{
+    io::AsyncWriteExt, net::{TcpListener, TcpStream, UdpSocket}, select, sync::{
         mpsc::{UnboundedReceiver, UnboundedSender}, Mutex
     }, task::JoinHandle
 };
@@ -280,7 +280,10 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         local.set_nodelay(true)?;
 
-        handle_pump(&mut local, &mut server.take()?).await.context("Error handling pump")?;
+        handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
+
+        local.shutdown().await?;
+        server.take()?.shutdown().await?;
 
         info!("✅ Connection closed.");
 

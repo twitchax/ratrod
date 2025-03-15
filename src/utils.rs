@@ -215,92 +215,92 @@ where
     A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
+    let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
 
-    // info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
+    info!("⬅️ {} bytes ➡️ {} bytes", result.1, result.0);
 
-    // Ok(result)
+    Ok(result)
 
-    let a = unsafe {
-        std::mem::transmute::<&mut A, &'static mut A>(a)
-    };
+    // let a = unsafe {
+    //     std::mem::transmute::<&mut A, &'static mut A>(a)
+    // };
 
-    let b = unsafe {
-        std::mem::transmute::<&mut B, &'static mut B>(b)
-    };
+    // let b = unsafe {
+    //     std::mem::transmute::<&mut B, &'static mut B>(b)
+    // };
 
-    let (mut read_a, mut write_a) = tokio::io::split(a);
-    let (mut read_b, mut write_b) = tokio::io::split(b);
+    // let (mut read_a, mut write_a) = tokio::io::split(a);
+    // let (mut read_b, mut write_b) = tokio::io::split(b);
 
-    let left: JoinHandle<Res<u64>> = tokio::spawn(async move {
-        //tokio::io::copy(&mut read_a, &mut write_b).await
-        let buf = &mut [0u8; Constant::BUFFER_SIZE];
-        let mut count = 0;
-        loop {
-            let n = read_a.read(buf).await?;
-            // if n == 0 {
-            //     break;
-            // }
-            write_b.write_all(&buf[..n]).await?;
-            write_b.flush().await?;
-            count += n as u64;
-        }
+    // let left: JoinHandle<Res<u64>> = tokio::spawn(async move {
+    //     //tokio::io::copy(&mut read_a, &mut write_b).await
+    //     let buf = &mut [0u8; Constant::BUFFER_SIZE];
+    //     let mut count = 0;
+    //     loop {
+    //         let n = read_a.read(buf).await?;
+    //         // if n == 0 {
+    //         //     break;
+    //         // }
+    //         write_b.write_all(&buf[..n]).await?;
+    //         write_b.flush().await?;
+    //         count += n as u64;
+    //     }
 
-        Ok(count)
-    });
+    //     Ok(count)
+    // });
     
-    let right: JoinHandle<Res<u64>> = tokio::spawn(async move {
-        //tokio::io::copy(&mut read_b, &mut write_a).await
-        let buf = &mut [0u8; Constant::BUFFER_SIZE];
-        let mut count = 0;
-        loop {
-            let n = read_b.read(buf).await?;
-            // if n == 0 {
-            //     break;
-            // }
-            write_a.write_all(&buf[..n]).await?;
-            write_a.flush().await?;
-            count += n as u64;
-        }
+    // let right: JoinHandle<Res<u64>> = tokio::spawn(async move {
+    //     //tokio::io::copy(&mut read_b, &mut write_a).await
+    //     let buf = &mut [0u8; Constant::BUFFER_SIZE];
+    //     let mut count = 0;
+    //     loop {
+    //         let n = read_b.read(buf).await?;
+    //         // if n == 0 {
+    //         //     break;
+    //         // }
+    //         write_a.write_all(&buf[..n]).await?;
+    //         write_a.flush().await?;
+    //         count += n as u64;
+    //     }
 
-        Ok(count)
-    });
+    //     Ok(count)
+    // });
 
-    let pumps = futures::future::select(left, right);
+    // let pumps = futures::future::select(left, right);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(240),
-        pumps
-    ).await?;
+    // let result = tokio::time::timeout(
+    //     std::time::Duration::from_secs(240),
+    //     pumps
+    // ).await?;
 
-    let r = match result {
-        Either::Left((Ok(a_result), other)) => {
-            let bytes_right = a_result?;
-            info!("➡️  {} bytes", bytes_right);
+    // let r = match result {
+    //     Either::Left((Ok(a_result), other)) => {
+    //         let bytes_right = a_result?;
+    //         info!("➡️  {} bytes", bytes_right);
             
-            let bytes_left = other.await??;
-            info!("⬅️  {} bytes", bytes_left);
+    //         let bytes_left = other.await??;
+    //         info!("⬅️  {} bytes", bytes_left);
 
-            (bytes_left, bytes_right)
-        }
-        Either::Right((Ok(b_result), other)) => {
-            let bytes_left = b_result?;
-            info!("⬅️  {} bytes", bytes_left);
+    //         (bytes_left, bytes_right)
+    //     }
+    //     Either::Right((Ok(b_result), other)) => {
+    //         let bytes_left = b_result?;
+    //         info!("⬅️  {} bytes", bytes_left);
 
-            let bytes_right = other.await??;
-            info!("➡️  {} bytes", bytes_right);
+    //         let bytes_right = other.await??;
+    //         info!("➡️  {} bytes", bytes_right);
 
-            (bytes_left, bytes_right)
-        }
-        Either::Left((Err(e), _)) => {
-            Err(e)?
-        }
-        Either::Right((Err(e), _)) => {
-            Err(e)?
-        }
-    };
+    //         (bytes_left, bytes_right)
+    //     }
+    //     Either::Left((Err(e), _)) => {
+    //         Err(e)?
+    //     }
+    //     Either::Right((Err(e), _)) => {
+    //         Err(e)?
+    //     }
+    // };
 
-    Ok(r)
+    // Ok(r)
 }
 
 #[cfg(test)]

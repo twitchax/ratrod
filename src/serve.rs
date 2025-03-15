@@ -6,10 +6,7 @@ use anyhow::Context;
 use regex::Regex;
 use secrecy::SecretString;
 use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket}, 
-    select, 
-    task::JoinHandle, 
-    time::Instant
+    io::AsyncWriteExt, net::{TcpListener, TcpStream, UdpSocket}, select, task::JoinHandle, time::Instant
 };
 use tracing::{Instrument, error, info, info_span};
 
@@ -217,7 +214,10 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    handle_pump(&mut client.take()?, &mut remote).await.context("Error handling TCP pump.")?;
+    handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
+
+    remote.shutdown().await?;
+    client.take()?.shutdown().await?;
 
     Ok(())
 }
