@@ -227,7 +227,9 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
                 warn!("Buffer overflow ({}): splitting packets", n);
 
                 let chunks = buf.chunks(Constant::BUFFER_SIZE).map(|c| ProtocolMessage::Data(c.to_vec())).collect::<Vec<_>>();
-                write_b.push_all(chunks).await?;
+                for chunk in chunks {
+                    write_b.push(chunk).await?;
+                }
             } else {
                 write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
             }
