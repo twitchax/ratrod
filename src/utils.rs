@@ -3,13 +3,10 @@
 //! This module provides various utility functions for generating keys, encrypting/decrypting data, and handling tunnels.
 //! It also includes functions for parsing tunnel definitions and handling bidirectional data transfer.
 
-use std::{time::Duration};
-
 use anyhow::Context;
 use base64::Engine;
-use futures::{future::Either, SinkExt};
+use futures::future::Either;
 use rand::{Rng, distr::Alphanumeric};
-use regex::bytes;
 use ring::{
     aead::{Aad, LessSafeKey, Nonce, UnboundKey},
     agreement::{EphemeralPrivateKey, agree_ephemeral},
@@ -18,11 +15,17 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair},
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, task::JoinHandle};
-use tracing::{debug, info, warn};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    task::JoinHandle,
+};
+use tracing::{debug, info};
 
 use crate::{
-    base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void}, buffed_stream::BuffedTcpStream, protocol::{BincodeReceive, BincodeSend, Challenge, ExchangePublicKey, ProtocolMessage, Signature}
+    base::{Base64KeyPair, Constant, EncryptedData, Err, ExchangeKeyPair, Res, SharedSecret, SharedSecretNonce, SharedSecretShape, TunnelDefinition, Void},
+    buffed_stream::BuffedTcpStream,
+    protocol::{BincodeReceive, BincodeSend, Challenge, ExchangePublicKey, ProtocolMessage, Signature},
 };
 
 /// Generates a random alphanumeric string of the specified length.
@@ -209,12 +212,12 @@ where
     tunnels.iter().map(|tunnel| parse_tunnel_definition(tunnel.as_ref())).collect()
 }
 
-pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> {
+pub async fn handle_pump(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> {
     let (mut read_a, mut write_a) = a.into_split();
     let (mut read_b, mut write_b) = b.into_split();
 
     let a_to_b: JoinHandle<Res<u64>> = tokio::spawn(async move {
-        let buf = &mut [0u8; 64 * 1024];
+        let buf = &mut [0u8; Constant::BUFFER_SIZE];
         let mut count = 0;
         loop {
             let n = read_a.read(buf).await?;
@@ -224,13 +227,13 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
             }
 
             write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
-            
+
             count += n as u64;
         }
 
         Ok(count)
     });
-    
+
     let b_to_a: JoinHandle<Res<u64>> = tokio::spawn(async move {
         let mut count = 0;
         loop {
@@ -246,139 +249,37 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
 
             write_a.write_all(&data).await?;
             write_a.flush().await?;
+
             count += data.len() as u64;
         }
 
         Ok(count)
     });
 
-    let pumps = futures::future::select(b_to_a, a_to_b);
-
-    let result = tokio::time::timeout(
-        Constant::UDP_TIMEOUT,
-        pumps,
-    ).await?;
+    let result = futures::future::select(a_to_b, b_to_a).await;
 
     match result {
-        Either::Left((Ok(a_result), other)) => {
-            let bytes_right = a_result?;
-            info!("➡️  {} bytes", bytes_right);
+        Either::Left((a_to_b, other)) => {
+            let right = a_to_b??;
+            let left = other.await??;
 
-            let bytes_left = other.await??;
-            info!("⬅️  {} bytes", bytes_left);
+            info!("📊 {} ⮀ {}", left, right);
 
-            Ok((bytes_left, bytes_right))
+            Ok((left, right))
         }
-        Either::Right((Ok(b_result), other)) => {
-            let bytes_left = b_result?;
-            info!("⬅️  {} bytes", bytes_left);
+        Either::Right((b_to_a, other)) => {
+            let right = b_to_a??;
+            let left = other.await??;
 
-            let bytes_right = other.await??;
-            info!("➡️  {} bytes", bytes_right);
+            info!("📊 {} ⮀ {}", left, right);
 
-            Ok((bytes_left, bytes_right))
+            Ok((left, right))
         }
-        Either::Left((Err(e), _)) => Err(e)?,
-        Either::Right((Err(e), _)) => Err(e)?,
     }
-}
-
-pub async fn handle_pump<A, B>(a: &mut A, b: &mut B) -> Res<(u64, u64)>
-where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
-{
-    let result = tokio::io::copy_bidirectional_with_sizes(a, b, Constant::BUFFER_SIZE, Constant::BUFFER_SIZE).await?;
-
-    info!("⬅️  {} bytes ➡️  {} bytes", result.1, result.0);
-
-    Ok(result)
-
-    // let a = unsafe {
-    //     std::mem::transmute::<&mut A, &'static mut A>(a)
-    // };
-
-    // let b = unsafe {
-    //     std::mem::transmute::<&mut B, &'static mut B>(b)
-    // };
-
-    // let (mut read_a, mut write_a) = tokio::io::split(a);
-    // let (mut read_b, mut write_b) = tokio::io::split(b);
-
-    // let left: JoinHandle<Res<u64>> = tokio::spawn(async move {
-    //     //tokio::io::copy(&mut read_a, &mut write_b).await
-    //     let buf = &mut [0u8; Constant::BUFFER_SIZE];
-    //     let mut count = 0;
-    //     loop {
-    //         let n = read_a.read(buf).await?;
-    //         // if n == 0 {
-    //         //     break;
-    //         // }
-    //         write_b.write_all(&buf[..n]).await?;
-    //         write_b.flush().await?;
-    //         count += n as u64;
-    //     }
-
-    //     Ok(count)
-    // });
-    
-    // let right: JoinHandle<Res<u64>> = tokio::spawn(async move {
-    //     //tokio::io::copy(&mut read_b, &mut write_a).await
-    //     let buf = &mut [0u8; Constant::BUFFER_SIZE];
-    //     let mut count = 0;
-    //     loop {
-    //         let n = read_b.read(buf).await?;
-    //         // if n == 0 {
-    //         //     break;
-    //         // }
-    //         write_a.write_all(&buf[..n]).await?;
-    //         write_a.flush().await?;
-    //         count += n as u64;
-    //     }
-
-    //     Ok(count)
-    // });
-
-    // let pumps = futures::future::select(left, right);
-
-    // let result = tokio::time::timeout(
-    //     std::time::Duration::from_secs(240),
-    //     pumps
-    // ).await?;
-
-    // let r = match result {
-    //     Either::Left((Ok(a_result), other)) => {
-    //         let bytes_right = a_result?;
-    //         info!("➡️  {} bytes", bytes_right);
-            
-    //         let bytes_left = other.await??;
-    //         info!("⬅️  {} bytes", bytes_left);
-
-    //         (bytes_left, bytes_right)
-    //     }
-    //     Either::Right((Ok(b_result), other)) => {
-    //         let bytes_left = b_result?;
-    //         info!("⬅️  {} bytes", bytes_left);
-
-    //         let bytes_right = other.await??;
-    //         info!("➡️  {} bytes", bytes_right);
-
-    //         (bytes_left, bytes_right)
-    //     }
-    //     Either::Left((Err(e), _)) => {
-    //         Err(e)?
-    //     }
-    //     Either::Right((Err(e), _)) => {
-    //         Err(e)?
-    //     }
-    // };
-
-    // Ok(r)
 }
 
 #[cfg(test)]
 pub mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::buffed_stream::{BuffedDuplexStream, BuffedStream};
 

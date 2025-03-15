@@ -10,7 +10,7 @@
 
 use std::{
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{Context, Poll},
 };
 
 use anyhow::Context as _;
@@ -37,13 +37,6 @@ use crate::{
 
 // Macros.
 
-/// Macro to get a ref to `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut AsyncBincodeStream<T>>`.
-macro_rules! pinned_inner {
-    ($self:ident) => {
-        Pin::new(&mut $self.inner)
-    };
-}
-
 /// Macro to take a `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut AsyncBincodeStream<T>>`.
 macro_rules! take_pinned_inner {
     ($self:ident) => {
@@ -62,20 +55,6 @@ macro_rules! take_pinned_inner_read {
 macro_rules! take_pinned_inner_write {
     ($self:ident) => {
         Pin::new(&mut $self.get_mut().inner_write)
-    };
-}
-
-/// Macro to get a ref to `Pin<&mut BuffedStream<T>>` and return the decryption stream `Pin<&mut BufReader<SimplexStream>>`.
-macro_rules! pinned_read_stream {
-    ($self:ident) => {
-        Pin::new($self.read_stream.as_mut().unwrap())
-    };
-}
-
-/// Macro to take a `Pin<&mut BuffedStreamReadHalf<T>>` and return the decryption stream `Pin<&mut SimplexStream>`.
-macro_rules! take_pinned_read_stream {
-    ($self:ident) => {
-        Pin::new($self.get_mut().read_stream.as_mut().unwrap())
     };
 }
 
@@ -425,10 +404,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::{future::join_all, SinkExt};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use futures::SinkExt;
 
-    use crate::{protocol::{BincodeReceive, BincodeSend, ProtocolMessage}, utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption}};
+    use crate::{
+        protocol::{BincodeReceive, BincodeSend, ProtocolMessage},
+        utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption},
+    };
 
     #[tokio::test]
     async fn test_unencrypted_buffed_stream() {
@@ -485,19 +466,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_e2e_buffed_stream_with_large_data() {
+        let (mut client, mut server) = generate_test_duplex();
+
+        let data = b"Hello, world!";
+        let data = data.repeat(10000);
+        let data_clone = data.clone();
+
+        let client_task = tokio::spawn(async move {
+            client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+            client.close().await.unwrap();
+        });
+
+        let server_task = tokio::spawn(async move {
+            let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+                panic!("Failed to receive message");
+            };
+
+            assert_eq!(data_clone, received);
+        });
+
+        let (result1, result2) = tokio::join!(client_task, server_task);
+
+        result1.unwrap();
+        result2.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream_with_large_data() {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
         let data = b"Hello, world!";
-        let data = data.repeat(1000);
+        let data = data.repeat(10000);
+        let data_clone = data.clone();
 
-        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
-        client.close().await.unwrap();
+        let client_task = tokio::spawn(async move {
+            client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+            client.close().await.unwrap();
+        });
 
-        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
-            panic!("Failed to receive message");
-        };
+        let server_task = tokio::spawn(async move {
+            let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+                panic!("Failed to receive message");
+            };
 
-        assert_eq!(data, received);
+            assert_eq!(data_clone, received);
+        });
+
+        let (result1, result2) = tokio::join!(client_task, server_task);
+
+        result1.unwrap();
+        result2.unwrap();
     }
 }

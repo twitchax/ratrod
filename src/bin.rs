@@ -44,7 +44,12 @@ async fn execute_command(key_path: Option<String>, command: Option<Command>) -> 
         Some(Command::Serve { bind, remote_regex }) => {
             ratrodlib::serve::Instance::prepare(key_path, remote_regex, bind)?.start().await?;
         }
-        Some(Command::Connect { server, tunnel, accept_all_hosts, encrypt }) => {
+        Some(Command::Connect {
+            server,
+            tunnel,
+            accept_all_hosts,
+            encrypt,
+        }) => {
             ratrodlib::connect::Instance::prepare(key_path, server, &tunnel, accept_all_hosts, encrypt)?.start().await?;
         }
         None => {
@@ -121,13 +126,13 @@ enum Command {
         /// it can be reduced to `remote_port`.
         ///
         /// Some examples:
-        /// 
+        ///
         /// - `3000:127.0.0.1:3000`: Requests to the client port 3000 route to `127.0.0.1:3000` on the server (
         ///   same as `3000:3000` or `3000`).
-        /// 
+        ///
         /// - `3000:127.0.0.1:80`: Requests to the client port 3000 route to `127.0.0.1:80` on the server (
         ///   same as `3000:80`).
-        /// 
+        ///
         /// - `3000:example.com:80`: Requests to the client port 3000 route to `example.com:80` on the server.
         ///   This is for use cases where the client can contact the server, but not the remote host, so the server
         ///   must act as a TCP proxy.
@@ -200,7 +205,11 @@ mod tests {
         tokio::spawn(ratrodlib::serve::Instance::prepare(server_key_path, remote_regex, server_address.clone()).unwrap().start());
 
         // Start a "client".
-        tokio::spawn(ratrodlib::connect::Instance::prepare(client_key_path, server_address, &client_tunnels, false, should_encrypt).unwrap().start());
+        tokio::spawn(
+            ratrodlib::connect::Instance::prepare(client_key_path, server_address, &client_tunnels, false, should_encrypt)
+                .unwrap()
+                .start(),
+        );
 
         // Do a "healthcheck" to ensure that the server is up and running.
 

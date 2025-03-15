@@ -27,7 +27,7 @@ impl Constant {
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
     pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
     pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
-    pub const BUFFER_SIZE: usize = 8 * 1024;
+    pub const BUFFER_SIZE: usize = 8 * 1024 - Constant::ENCRYPTION_OVERHEAD;
     pub const CHALLENGE_SIZE: usize = 32;
     pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
     pub const DELIMITER_SIZE: usize = 8;
@@ -42,7 +42,7 @@ impl Constant {
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
     pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
     pub const SIGNATURE_SIZE: usize = 64;
-    pub const UDP_TIMEOUT: Duration = Duration::from_secs(120);
+    pub const TIMEOUT: Duration = Duration::from_secs(120);
 }
 
 /// A helper for the Shape of the shared secret.

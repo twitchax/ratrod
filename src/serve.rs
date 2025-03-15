@@ -6,7 +6,10 @@ use anyhow::Context;
 use regex::Regex;
 use secrecy::SecretString;
 use tokio::{
-    io::AsyncWriteExt, net::{TcpListener, TcpStream, UdpSocket}, select, task::JoinHandle, time::Instant
+    net::{TcpListener, TcpStream, UdpSocket},
+    select,
+    task::JoinHandle,
+    time::Instant,
 };
 use tracing::{Instrument, error, info, info_span};
 
@@ -15,7 +18,7 @@ use crate::{
     buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientPreamble, ProtocolError, ProtocolMessage, ServerPreamble, Signature},
     security::{resolve_authorized_keys, resolve_keypath, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, handle_pump_2, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -204,7 +207,7 @@ where
 
 /// Runs the pump with a TCP-connected remote.
 async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
-    let Ok(mut remote) = TcpStream::connect(remote_address).await.context("Error connecting to remote") else {
+    let Ok(remote) = TcpStream::connect(remote_address).await.context("Error connecting to remote") else {
         return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
             .send_and_bail(&mut client)
             .await;
@@ -214,7 +217,7 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    handle_pump_2(remote, client).await.context("Error handling TCP pump.")?;
+    handle_pump(remote, client).await.context("Error handling TCP pump.")?;
 
     Ok(())
 }
@@ -240,7 +243,7 @@ async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
     let remote_down = remote_up.clone();
 
     // Run the pumps.
-    
+
     let last_activity = Arc::new(tokio::sync::Mutex::new(Instant::now()));
     let last_activity_up = last_activity.clone();
     let last_activity_down = last_activity.clone();
@@ -268,12 +271,12 @@ async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
         loop {
             let last_activity = *last_activity.lock().await;
 
-            if last_activity.elapsed() > Constant::UDP_TIMEOUT {
+            if last_activity.elapsed() > Constant::TIMEOUT {
                 info!("✅ UDP connection timed out (assumed graceful close).");
                 return Ok(());
             }
 
-            tokio::time::sleep(Constant::UDP_TIMEOUT).await;
+            tokio::time::sleep(Constant::TIMEOUT).await;
         }
     });
 

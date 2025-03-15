@@ -8,9 +8,13 @@ use anyhow::Context;
 use futures::join;
 use secrecy::SecretString;
 use tokio::{
-    io::AsyncWriteExt, net::{TcpListener, TcpStream, UdpSocket}, select, sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender}, Mutex
-    }, task::JoinHandle
+    net::{TcpListener, TcpStream, UdpSocket},
+    select,
+    sync::{
+        Mutex,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+    },
+    task::JoinHandle,
 };
 use tracing::{Instrument, error, info, info_span};
 
@@ -19,7 +23,7 @@ use crate::{
     buffed_stream::BuffedTcpStream,
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ExchangePublicKey, ProtocolMessage},
     security::{resolve_keypath, resolve_known_hosts, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, handle_pump_2, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -265,14 +269,14 @@ async fn run_tcp_server(tunnel_definition: TunnelDefinition, config: Config) {
 /// Handles the TCP connection.
 ///
 /// This is the main entry point for the connection. It is used to handle the handshake and pump data between the client and server.
-async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config) {
+async fn handle_tcp(local: TcpStream, remote_address: String, config: Config) {
     let id = random_string(6);
     let span = info_span!("tcp", id = id);
 
     let result: Void = async move {
         // Connect.
 
-        let mut server = connect(&config, &remote_address, false).await?;
+        let server = connect(&config, &remote_address, false).await?;
 
         // Handle the TCP pump.
 
@@ -280,7 +284,7 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         local.set_nodelay(true)?;
 
-        handle_pump_2(local, server).await.context("Error handling pump")?;
+        handle_pump(local, server).await.context("Error handling pump")?;
 
         info!("✅ Connection closed.");
 
@@ -376,7 +380,7 @@ async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data
         let client_socket_clone = client_socket.clone();
         let (mut remote_read, mut remote_write) = server.into_split();
 
-        // Connection will be closed automatically when either client side disconnects or 
+        // Connection will be closed automatically when either client side disconnects or
         // when the server detects inactivity timeout. No explicit disconnect logic needed here.
 
         let pump_up: JoinHandle<Void> = tokio::spawn(async move {

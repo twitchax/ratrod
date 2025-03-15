@@ -1,10 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use futures::{future::join_all, SinkExt};
+use futures::SinkExt;
 use ratrodlib::{
-    base::{Constant, ExchangeKeyPair, SharedSecret}, buffed_stream::BuffedDuplexStream, protocol::{BincodeReceive, BincodeSend, ProtocolMessage}, utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret}
+    base::{Constant, ExchangeKeyPair, SharedSecret},
+    buffed_stream::BuffedDuplexStream,
+    protocol::{BincodeReceive, BincodeSend, ProtocolMessage},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret},
 };
 use secrecy::ExposeSecret;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub fn generate_test_ephemeral_key_pair() -> ExchangeKeyPair {
     generate_ephemeral_key_pair().unwrap()
