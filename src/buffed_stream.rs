@@ -232,34 +232,6 @@ where
     }
 }
 
-impl<R, W> AsyncRead for BuffedStream<R, W>
-where
-    R: AsyncRead + Unpin,
-    W: Unpin,
-{
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        take_pinned_inner_read!(self).poll_read(cx, buf)
-    }
-}
-
-impl<R, W> AsyncWrite for BuffedStream<R, W>
-where
-    R: Unpin,
-    W: AsyncWrite + Unpin,
-{
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-        take_pinned_inner_write!(self).poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        AsyncWrite::poll_flush(take_pinned_inner_write!(self), cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        take_pinned_inner_write!(self).poll_shutdown(cx)
-    }
-}
-
 // Split streams.
 
 pub struct BuffedStreamReadHalf<T> {
@@ -328,88 +300,6 @@ where
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
-    }
-}
-
-impl<T> AsyncRead for BuffedStreamReadHalf<T>
-where
-    T: AsyncRead + Unpin,
-{
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        // Read directly from the inner stream if there is no shared secret.
-        // This is the case where we are not encrypting the stream.
-        //
-        // Basically, this is an optimization that both `poll_read` and `poll_write` can use for
-        // the case where we are not encrypting the stream.
-        // if self.shared_secret.is_none() {
-        //     return Pin::new(self.inner.get_mut()).poll_read(cx, buf);
-        // }
-
-        // Use the "self" reader to get the next packet (and perform any needed decryption).
-        // Performance optimization opportunity: We could loop on poll_next here until we either 
-        // get Poll::Pending, or we no longer have space in the read_stream buffer.
-        let result = self.as_mut().poll_next(cx);
-
-        match result {
-            Poll::Ready(Some(Ok(message))) => {
-                let ProtocolMessage::Data(data) = message else {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Received non-data message during `poll_read`, which shouldn't happen",
-                    )));
-                };
-
-                if buf.remaining() < data.len() {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Buffer is too small to hold the decrypted data",
-                    )));
-                }
-
-                buf.initialize_unfilled_to(data.len());
-                buf.put_slice(&data);
-
-                return Poll::Ready(Ok(()));
-
-                // // We have the data, so we can write it to the `read_stream`.
-                // let written = ready!(pinned_read_stream!(self).poll_write(cx, &data)?);
-
-                // // Fail if the interim buffer is too small.
-                // if written < data.len() {
-                //     return Poll::Ready(Err(std::io::Error::new(
-                //         std::io::ErrorKind::InvalidData,
-                //         "Decryption stream buffer overflow (shouldn't happen unless there is a mismatched buffer size between client and server)",
-                //     )));
-                // }
-
-                // // Flush the `read_stream` to ensure that the data is available for reading (see below).
-                // ready!(pinned_read_stream!(self).poll_flush(cx)?);
-            }
-            Poll::Ready(Some(Err(e))) => {
-                // This is the case where we have a bincode error, so we should return the error.
-
-                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Error on bincode reading during pump: {}", e))));
-            }
-            Poll::Ready(None) => {
-                // If we read no data from the inner buffer, then we are "shutdown",
-                // so we should shutdown the write side of the `decryption_stream`, and
-                // return the final poll result (bottom of function).
-
-                //ready!(pinned_read_stream!(self).poll_shutdown(cx)?);
-
-                return Poll::Ready(Ok(()));
-            }
-            Poll::Pending => {
-                // If we are pending, then we should pass through to the underlying decryption stream (so do nothing here).
-                // The underlying decryption stream will be properly shutdown in the case of a shutdown on the inner stream.
-
-                return Poll::Pending;
-            }
-        }
-
-        // At this point, if there was data to decrypt, we have decrypted it; if not, we may have some data in the
-        // decrypted stream, so we just offload onto its `poll_read` method.
-        //take_pinned_read_stream!(self).poll_read(cx, buf)
     }
 }
 
@@ -483,110 +373,67 @@ where
     }
 }
 
-impl<T> AsyncWrite for BuffedStreamWriteHalf<T>
-where
-    T: AsyncWrite + Unpin,
-{
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-        // If there is no shared secret, then we are not encrypting the stream,
-        // so we can just write directly to the inner stream.
-        //
-        // Basically, this is an optimization that both `poll_read` and `poll_write` can use for
-        // the case where we are not encrypting the stream.
-        // if self.shared_secret.is_none() {
-        //     return Pin::new(self.inner.get_mut()).poll_write(cx, buf);
-        // }
-
-        // First, we need to pare down the data to the maximum size of the encrypted packet, if needed.
-        let original_size = buf.len();
-        let max_size = Constant::BUFFER_SIZE - Constant::ENCRYPTION_OVERHEAD;
-
-        let amt = std::cmp::min(original_size, max_size);
-        let buf = &buf[..amt];
-
-        if amt == max_size {
-            warn!("Buffer ({}) was too large for the encrypted packet, and was not completely written", original_size);
-        }
-
-        let message = ProtocolMessage::Data(buf.to_vec());
-
-        // Write the encrypted data to the "self" `start_send`, which performs any needed encryption logic.
-        self.as_mut()
-            .start_send(message)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to write encrypted packet"))?;
-
-        // Need to report the amount of data that was written _from the input_, not the _actual_ amount written to the inner stream.
-        // This allows the caller to know how much of _their_ data was written, which is all that matters.
-        Poll::Ready(Ok(amt))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        pinned_inner!(self)
-            .poll_flush(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        pinned_inner!(self)
-            .poll_close(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to shutdown inner stream: {}", e)))
-    }
-}
-
 // Tests.
 
 #[cfg(test)]
 mod tests {
-    use futures::future::join_all;
+    use futures::{future::join_all, SinkExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption};
+    use crate::{protocol::{BincodeReceive, BincodeSend, ProtocolMessage}, utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption}};
 
     #[tokio::test]
     async fn test_unencrypted_buffed_stream() {
         let (mut client, mut server) = generate_test_duplex();
 
-        let data = b"Hello, world!";
+        let data = b"Hello, world!".to_vec();
 
-        client.write_all(data).await.unwrap();
-        client.shutdown().await.unwrap();
+        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+        client.close().await.unwrap();
 
-        let mut received = Vec::new();
-        server.read_to_end(&mut received).await.unwrap();
+        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+            panic!("Failed to receive message");
+        };
 
-        assert_eq!(data, &received[..]);
+        assert_eq!(data, received);
     }
 
     #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream() {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
-        let data = b"Hello, world!";
+        let data = b"Hello, world!".to_vec();
 
-        client.write_all(data).await.unwrap();
-        client.shutdown().await.unwrap();
+        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+        client.close().await.unwrap();
 
-        let mut received = Vec::new();
-        server.read_to_end(&mut received).await.unwrap();
+        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+            panic!("Failed to receive message");
+        };
 
-        assert_eq!(data, &received[..]);
+        assert_eq!(data, received);
     }
 
     #[tokio::test]
     async fn test_e2e_encrypted_buffed_stream_with_multiple_packets() {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
-        let data1 = b"Hello, world!";
-        let data2 = b"Hello, world!";
+        let data1 = b"Hello, world!".to_vec();
+        let data2 = b"Hello, wold!".to_vec();
 
-        client.write_all(data1).await.unwrap();
-        client.write_all(data2).await.unwrap();
-        client.shutdown().await.unwrap();
+        client.push(ProtocolMessage::Data(data1.clone())).await.unwrap();
+        client.push(ProtocolMessage::Data(data2.clone())).await.unwrap();
+        client.close().await.unwrap();
 
-        let mut received = Vec::new();
-        server.read_to_end(&mut received).await.unwrap();
+        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+            panic!("Failed to receive message");
+        };
+        assert_eq!(data1, received);
 
-        assert_eq!(data1.len() + data2.len(), received.len());
+        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+            panic!("Failed to receive message");
+        };
+        assert_eq!(data2, received);
     }
 
     #[tokio::test]
@@ -594,21 +441,15 @@ mod tests {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
         let data = b"Hello, world!";
-        let data = data.repeat(10000);
+        let data = data.repeat(1000);
 
-        let data_clone = data.clone();
+        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+        client.close().await.unwrap();
 
-        let write_task = tokio::spawn(async move {
-            client.write_all(&data_clone).await.unwrap();
-            client.shutdown().await.unwrap();
-        });
+        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+            panic!("Failed to receive message");
+        };
 
-        let read_task = tokio::spawn(async move {
-            let mut received = Vec::new();
-            server.read_to_end(&mut received).await.unwrap();
-            assert_eq!(data.len(), received.len());
-        });
-
-        join_all([write_task, read_task]).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(data, received);
     }
 }

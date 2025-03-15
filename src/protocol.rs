@@ -138,7 +138,7 @@ impl ProtocolError {
         let error_message = self.to_string();
 
         let _ = stream.push(ProtocolMessage::Error(self)).await;
-        let _ = stream.shutdown().await;
+        let _ = stream.close().await;
 
         Err(Err::msg(error_message))
     }
@@ -152,7 +152,7 @@ impl ProtocolError {
 /// [`ProtocolMessage`] messages. This restriction is important for type safety
 /// and to ensure that all messages sent through the stream follow the protocol
 /// format and are properly encrypted if necessary.
-pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpin + Sized {
+pub trait BincodeSend: Sink<ProtocolMessage> + Unpin + Sized {
     fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void> {
         async move { self.send(message).await.map_err(|_| Err::msg("Failed to send message")) }
     }
@@ -163,7 +163,7 @@ pub trait BincodeSend: Sink<ProtocolMessage> + AsyncWrite + AsyncWriteExt + Unpi
 /// This impl is designed to ensure that the pull method can only be used to receive
 /// [`ProtocolMessage`] messages. This restriction provides type safety and ensures
 /// proper message decryption and protocol handling for incoming data.
-pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + AsyncReadExt + Unpin + Sized {
+pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + Unpin + Sized {
     fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>> {
         async move {
             let message = match self.next().await {
@@ -178,8 +178,8 @@ pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + Asyn
 
 // Blanket impl for BincodeSend and BincodeReceive where T implements `Sink` and `Stream`.
 
-impl<T> BincodeSend for T where Self: Sink<ProtocolMessage> + AsyncWrite + Unpin + Sized {}
-impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolMessage>> + AsyncRead + Unpin + Sized {}
+impl<T> BincodeSend for T where Self: Sink<ProtocolMessage> + Unpin + Sized {}
+impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolMessage>> + Unpin + Sized {}
 
 // Signature serialization.
 

@@ -1,9 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use futures::future::join_all;
+use futures::{future::join_all, SinkExt};
 use ratrodlib::{
-    base::{Constant, ExchangeKeyPair, SharedSecret},
-    buffed_stream::BuffedDuplexStream,
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret},
+    base::{Constant, ExchangeKeyPair, SharedSecret}, buffed_stream::BuffedDuplexStream, protocol::{BincodeReceive, BincodeSend, ProtocolMessage}, utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret}
 };
 use secrecy::ExposeSecret;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,20 +35,14 @@ async fn large_data_bench(encrypted: bool) {
     let data = b"Hello, world!";
     let data = data.repeat(1000000);
 
-    let data_clone = data.clone();
+    client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+    client.close().await.unwrap();
 
-    let write_task = tokio::spawn(async move {
-        client.write_all(&data_clone).await.unwrap();
-        client.shutdown().await.unwrap();
-    });
+    let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+        panic!("Failed to receive message");
+    };
 
-    let read_task = tokio::spawn(async move {
-        let mut received = Vec::new();
-        server.read_to_end(&mut received).await.unwrap();
-        assert_eq!(data.len(), received.len());
-    });
-
-    join_all([write_task, read_task]).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(received, data);
 }
 
 fn bench(c: &mut Criterion) {

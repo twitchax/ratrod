@@ -223,6 +223,10 @@ pub async fn handle_pump_2(a: TcpStream, b: BuffedTcpStream) -> Res<(u64, u64)> 
                 break;
             }
 
+            if n > Constant::BUFFER_SIZE {
+                return Err(Err::msg("Buffer overflow"));
+            }
+
             write_b.push(ProtocolMessage::Data(buf[..n].to_vec())).await?;
             count += n as u64;
         }
@@ -494,45 +498,5 @@ pub mod tests {
 
         let input = "a:b:c:d:e:f";
         assert!(parse_tunnel_definition(input).is_err());
-    }
-
-    #[tokio::test]
-    async fn test_handle_pump() {
-        let (mut client, mut server1) = generate_test_duplex();
-        let (mut server2, mut remote) = generate_test_duplex();
-
-        client.write_all(b"Hello, remote!").await.unwrap();
-        client.shutdown().await.unwrap();
-        remote.write_all(b"Hello, client!!").await.unwrap();
-        remote.shutdown().await.unwrap();
-
-        let (up, down) = handle_pump(&mut server1, &mut server2).await.unwrap();
-
-        assert_eq!(up, 14);
-        assert_eq!(down, 15);
-
-        let mut client_received = vec![];
-        client.read_to_end(&mut client_received).await.unwrap();
-        assert_eq!(client_received, b"Hello, client!!");
-
-        let mut remote_received = vec![];
-        remote.read_to_end(&mut remote_received).await.unwrap();
-        assert_eq!(remote_received, b"Hello, remote!");
-    }
-
-    #[tokio::test]
-    async fn test_handle_pump_with_encryption() {
-        let (mut client, mut server1) = generate_test_duplex_with_encryption();
-        let (mut server2, mut remote) = generate_test_duplex_with_encryption();
-
-        client.write_all(b"Hello, remote!").await.unwrap();
-        client.shutdown().await.unwrap();
-        remote.write_all(b"Hello, client!!").await.unwrap();
-        remote.shutdown().await.unwrap();
-
-        let (up, down) = handle_pump(&mut server1, &mut server2).await.unwrap();
-
-        assert_eq!(up, 14);
-        assert_eq!(down, 15);
     }
 }
