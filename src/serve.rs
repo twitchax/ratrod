@@ -216,8 +216,8 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     handle_pump(&mut client, &mut remote).await.context("Error handling TCP pump.")?;
 
-    remote.shutdown().await?;
-    client.take()?.shutdown().await?;
+    let _ = remote.shutdown().await;
+    let _ = client.take()?.shutdown().await;
 
     Ok(())
 }

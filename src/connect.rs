@@ -282,8 +282,8 @@ async fn handle_tcp(mut local: TcpStream, remote_address: String, config: Config
 
         handle_pump(&mut local, &mut server).await.context("Error handling pump")?;
 
-        local.shutdown().await?;
-        server.take()?.shutdown().await?;
+        let _ = local.shutdown().await;
+        let _ = server.take()?.shutdown().await;
 
         info!("✅ Connection closed.");
 
