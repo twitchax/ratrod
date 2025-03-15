@@ -153,21 +153,7 @@ impl ProtocolError {
 /// and to ensure that all messages sent through the stream follow the protocol
 /// format and are properly encrypted if necessary.
 pub trait BincodeSend: Sink<ProtocolMessage> + Unpin + Sized {
-    fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void> {
-        async move { self.send(message).await.map_err(|_| Err::msg("Failed to send message")) }
-    }
-
-    // fn push_all(&mut self, messages: impl IntoIterator<Item = ProtocolMessage>) -> impl Future<Output = Void> {
-    //     async move {
-    //         for message in messages.into_iter() {
-    //             self.feed(message).await.unwrap();
-    //         }
-            
-    //         self.flush().await.map_err(|_| Err::msg("Failed to flush"))?;
-
-    //         Ok(())
-    //     }
-    // }
+    fn push(&mut self, message: ProtocolMessage) -> impl Future<Output = Void>;
 }
 
 /// A trait for receiving protocol messages over a stream.
@@ -176,22 +162,8 @@ pub trait BincodeSend: Sink<ProtocolMessage> + Unpin + Sized {
 /// [`ProtocolMessage`] messages. This restriction provides type safety and ensures
 /// proper message decryption and protocol handling for incoming data.
 pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + Unpin + Sized {
-    fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>> {
-        async move {
-            let message = match self.next().await {
-                Some(Ok(message)) => message,
-                Some(Err(e)) => return Err(Err::msg(format!("Failed to receive message: {}", e))),
-                None => ProtocolMessage::Shutdown,
-            };
-            Ok(message)
-        }
-    }
+    fn pull(&mut self) -> impl Future<Output = Res<ProtocolMessage>>;
 }
-
-// Blanket impl for BincodeSend and BincodeReceive where T implements `Sink` and `Stream`.
-
-impl<T> BincodeSend for T where Self: Sink<ProtocolMessage> + Unpin + Sized {}
-impl<T> BincodeReceive for T where Self: Stream<Item = std::io::Result<ProtocolMessage>> + Unpin + Sized {}
 
 // Signature serialization.
 

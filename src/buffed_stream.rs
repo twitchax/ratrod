@@ -18,7 +18,7 @@ use async_bincode::{
     AsyncDestination,
     tokio::{AsyncBincodeReader, AsyncBincodeWriter},
 };
-use futures::{Sink, Stream};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use secrecy::ExposeSecret;
 use tokio::{
     io::{AsyncRead, AsyncWrite, DuplexStream, ReadHalf, SimplexStream, WriteHalf},
@@ -30,8 +30,8 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    base::{Constant, Res, SharedSecret},
-    protocol::{ProtocolMessage, ProtocolMessageWrapper},
+    base::{Constant, Res, SharedSecret, Void},
+    protocol::{BincodeReceive, BincodeSend, ProtocolMessage, ProtocolMessageWrapper},
     utils::{decrypt, encrypt},
 };
 
@@ -232,6 +232,28 @@ where
     }
 }
 
+impl<R, W> BincodeSend for BuffedStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    async fn push(&mut self, message: ProtocolMessage) -> Void {
+        self.inner_write.push(message).await?;
+
+        Ok(())
+    }
+}
+
+impl<R, W> BincodeReceive for BuffedStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    async fn pull(&mut self) -> Res<ProtocolMessage> {
+        self.inner_read.pull().await
+    }
+}
+
 // Split streams.
 
 pub struct BuffedStreamReadHalf<T> {
@@ -303,6 +325,21 @@ where
     }
 }
 
+impl<T> BincodeReceive for BuffedStreamReadHalf<T>
+where
+    T: AsyncRead + Unpin,
+{
+    async fn pull(&mut self) -> Res<ProtocolMessage> {
+        let message = self.next().await;
+
+        match message {
+            Some(Ok(message)) => Ok(message),
+            Some(Err(e)) => Err(anyhow::Error::msg(format!("Failed to read message: {}", e))),
+            None => Ok(ProtocolMessage::Shutdown),
+        }
+    }
+}
+
 pub struct BuffedStreamWriteHalf<T> {
     inner: AsyncBincodeWriter<T, ProtocolMessageWrapper, AsyncDestination>,
     shared_secret: Option<SharedSecret>,
@@ -370,6 +407,17 @@ where
         take_pinned_inner!(self)
             .poll_close(cx)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to shutdown inner stream: {}", e)))
+    }
+}
+
+impl<T> BincodeSend for BuffedStreamWriteHalf<T>
+where
+    T: AsyncWrite + Unpin,
+{
+    async fn push(&mut self, message: ProtocolMessage) -> Void {
+        self.send(message).await?;
+
+        Ok(())
     }
 }
 
