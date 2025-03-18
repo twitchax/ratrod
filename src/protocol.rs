@@ -4,6 +4,7 @@
 
 use std::fmt::{Display, Formatter};
 
+use bincode::{Decode, Encode};
 use futures::{Sink, SinkExt, Stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -21,7 +22,7 @@ pub type Signature = [u8; Constant::SIGNATURE_SIZE];
 pub type ExchangePublicKey = [u8; Constant::PEER_PUBLIC_KEY_SIZE];
 
 /// Serves as the preamble for the connection.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub struct ClientPreamble {
     pub exchange_public_key: ExchangePublicKey,
     pub remote: String,
@@ -33,7 +34,7 @@ pub struct ClientPreamble {
 /// Serves as the server's response to the preamble, containing its
 /// public key, its signature of the client's challenge and a challenge.
 /// The server signs the client's challenge to prove its identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub struct ServerPreamble {
     /// The server's identity public key (base64 encoded Ed25519 key)
     pub identity_public_key: String,
@@ -46,7 +47,7 @@ pub struct ServerPreamble {
 }
 
 /// Serves as the client's response to the server's challenge.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub struct ClientAuthentication {
     pub identity_public_key: String,
     pub signature: SerializeableSignature,
@@ -61,7 +62,7 @@ pub trait BincodeMessage: Serialize + DeserializeOwned {}
 ///
 /// This is the main message type for the protocol. It is used to send and receive messages over the network.
 /// It is also used to serialize and deserialize messages.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub enum ProtocolMessage {
     ClientPreamble(ClientPreamble),
     ServerPreamble(ServerPreamble),
@@ -105,7 +106,7 @@ pub enum ProtocolMessageWrapper {
 /// It should not be sent / received over the network, as it
 /// should be sent as a [`ProtocolMessage::Error`] message.
 /// The type system should prevent this from happening.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub enum ProtocolError {
     InvalidHost(String),
     InvalidKey(String),
@@ -166,7 +167,7 @@ pub trait BincodeReceive: Stream<Item = std::io::Result<ProtocolMessage>> + Unpi
 // Signature serialization.
 
 /// A helper type for serializing signatures (bincode cannot serialize a `[u8; 64]` out of the box).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct SerializeableSignature(pub Signature);
 
 impl From<Signature> for SerializeableSignature {

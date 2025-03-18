@@ -30,7 +30,7 @@ async-bincode = { version = "0.7" }
 serde = { version = "1", features = ["derive"] }
 homedir = { version = "0.3" }
 secrecy = { version = "0.10" }
-bincode = { version = "1" }
+bincode = { version = "2" }
 
 [dev-dependencies]
 pretty_assertions = "1"

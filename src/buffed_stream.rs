@@ -287,7 +287,7 @@ where
                         return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed"))));
                     };
 
-                    let Ok(message) = bincode::deserialize::<ProtocolMessage>(&decrypted_data) else {
+                    let Ok((message, _)) = bincode::decode_from_slice(&decrypted_data, bincode::config::standard()) else {
                         return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize decrypted data"))));
                     };
 
@@ -356,7 +356,7 @@ where
         if let Some(key) = self.shared_secret.as_ref() {
             let encrypted_data = encrypt(
                 key,
-                &bincode::serialize(&item).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to serialize message"))?,
+                &bincode::encode_to_vec(&item, bincode::config::standard()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to serialize message"))?,
             )
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Encryption failed"))?;
 
