@@ -75,7 +75,7 @@ where
     // Validate the remote is OK.
 
     if !config.remote_regex.is_match(preamble.remote) {
-        return ProtocolError::InvalidHost(format!("Invalid host from client (supplied `{}`, but need to satisfy `{}`)", preamble.remote, config.remote_regex))
+        return ProtocolError::InvalidHost(&format!("Invalid host from client (supplied `{}`, but need to satisfy `{}`)", preamble.remote, config.remote_regex))
             .send_and_bail(stream)
             .await;
     }
@@ -121,18 +121,18 @@ where
 
     let guard = stream.pull().await?;
     let ProtocolMessage::ClientAuthentication(client_authentication) = guard.message().fail_if_error()? else {
-        return ProtocolError::InvalidKey("Invalid handshake response".into()).send_and_bail(stream).await;
+        return ProtocolError::InvalidKey("Invalid handshake response").send_and_bail(stream).await;
     };
 
     // Verify the signature.
 
     if validate_signed_challenge(server_challenge, client_authentication.signature, client_authentication.identity_public_key).is_err() {
-        return ProtocolError::InvalidKey("Invalid challenge signature from client".into()).send_and_bail(stream).await;
+        return ProtocolError::InvalidKey("Invalid challenge signature from client").send_and_bail(stream).await;
     }
 
     // Validate that the key is authorized.
     if !config.authorized_keys.iter().any(|k| k == client_authentication.identity_public_key) {
-        return ProtocolError::InvalidKey("Unauthorized key from client".into()).send_and_bail(stream).await;
+        return ProtocolError::InvalidKey("Unauthorized key from client").send_and_bail(stream).await;
     }
 
     info!("✅ Handshake challenge completed!");
@@ -171,7 +171,7 @@ where
 
     let guard = read.pull().await?;
     let ProtocolMessage::ClientPreamble(preamble) = guard.message() else {
-        return ProtocolError::Unknown("Invalid handshake start".into()).send_and_bail(stream).await;
+        return ProtocolError::Unknown("Invalid handshake start").send_and_bail(stream).await;
     };
 
     // Extract the preamble ta so the borrows into the stream can be dropped.
@@ -216,7 +216,7 @@ where
 /// Runs the pump with a TCP-connected remote.
 async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
     let Ok(remote) = TcpStream::connect(remote_address).await.context("Error connecting to remote") else {
-        return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
+        return ProtocolError::RemoteFailed(&format!("Failed to connect to remote `{}`", remote_address))
             .send_and_bail(&mut client)
             .await;
     };
@@ -234,7 +234,7 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
     let remote = UdpSocket::bind("127.0.0.1:0").await.context("Error binding UDP socket")?;
     if remote.connect(remote_address).await.is_err() {
-        return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
+        return ProtocolError::RemoteFailed(&format!("Failed to connect to remote `{}`", remote_address))
             .send_and_bail(&mut client)
             .await;
     }
@@ -467,7 +467,7 @@ mod tests {
         // Verify client received error
         let guard = client.pull().await.unwrap();
         if let ProtocolMessage::Error(error) = guard.message() {
-            assert_eq!(error, &ProtocolError::Unknown("Invalid handshake start".into()));
+            assert_eq!(error, &ProtocolError::Unknown("Invalid handshake start"));
         } else {
             panic!("Expected error message, got: {:?}", guard.message());
         }

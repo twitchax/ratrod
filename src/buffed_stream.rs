@@ -246,7 +246,7 @@ where
         // for the next read.
         //
         // In many cases, the guards may have been dropped, and reserve will not allocate,
-        // but we need to make sure we have enough space for the next read in case they haven't
+        // but we need to make sure we have enough space for the next read in case they haven't.
         //
         // In practice, this is used in the pump, so guards are usually dropped within a
         // few reads, but not after _every_ read (which is why we don't use `try_reclaim` here).
@@ -397,7 +397,7 @@ where
     {
         // Restore the buffer to its original state.
         // We use `try_reclaim` here to avoid allocating a new buffer, and there
-        // _should never be a case where we cannot.  The produced interim `Bytes` are all dropped
+        // _should_ never be a case where we cannot.  The produced interim `Bytes` are all dropped
         // at the end of the function, and we currently have a unique mutable borrow, so there cannot
         // be any other references to the buffer.
 
@@ -412,6 +412,8 @@ where
         unsafe { self.buffer.set_len(Constant::BUFFER_SIZE) };
         let n = bincode::encode_into_slice(message, &mut self.buffer, Constant::BINCODE_CONFIG)?;
         unsafe { self.buffer.set_len(n) };
+
+        // Encrypt the message if, needed.
 
         let maybe_nonce = if let Some(key) = self.shared_secret.as_ref() {
             // This call extends the buffer through `Extend`, so no need to update the length.

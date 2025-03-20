@@ -5,7 +5,7 @@
 use std::fmt::{Display, Formatter};
 
 use anyhow::anyhow;
-use bincode::{BorrowDecode, Decode, Encode};
+use bincode::{BorrowDecode, Encode};
 use bytes::Bytes;
 use ouroboros::self_referencing;
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ pub enum ProtocolMessage<'a> {
     HandshakeCompletion,
     Data(&'a [u8]),
     UdpData(&'a [u8]),
-    Error(ProtocolError),
+    Error(ProtocolError<'a>),
     Shutdown,
 }
 
@@ -79,7 +79,7 @@ impl ProtocolMessage<'_> {
     /// If it is, returns the message wrapped in an error.
     pub fn fail_if_error(&self) -> Res<&Self> {
         if let ProtocolMessage::Error(error) = self {
-            return Err(anyhow!(error.clone()));
+            return Err(anyhow!(error.to_string()));
         }
 
         Ok(self)
@@ -96,15 +96,15 @@ impl ProtocolMessage<'_> {
 /// It should not be sent / received over the network, as it
 /// should be sent as a [`ProtocolMessage::Error`] message.
 /// The type system should prevent this from happening.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
-pub enum ProtocolError {
-    InvalidHost(String),
-    InvalidKey(String),
-    RemoteFailed(String),
-    Unknown(String),
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Encode, BorrowDecode)]
+pub enum ProtocolError<'a> {
+    InvalidHost(&'a str),
+    InvalidKey(&'a str),
+    RemoteFailed(&'a str),
+    Unknown(&'a str),
 }
 
-impl Display for ProtocolError {
+impl Display for ProtocolError<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ProtocolError::InvalidHost(host) => write!(f, "Invalid host: {}", host),
@@ -115,7 +115,7 @@ impl Display for ProtocolError {
     }
 }
 
-impl ProtocolError {
+impl ProtocolError<'_> {
     /// Sends the error message and shuts down the stream.
     ///
     /// The generic parameter R represents the return type expected by the calling function.
