@@ -146,7 +146,7 @@ $ ratrod connect -e 192.168.1.100:19000 2000:google.com:80
 ```
 
 The client and server will each generate an ephemeral keypair for each connection, and they will generate a shared secret using the
-[Diffie-Hellman key exchange algorithm](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/x25519/).
+[Diffie-Hellman key exchange algorithm](https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange).
 The shared secret is used to encrypt the traffic between the client and server after the handshake (handshake is plaintext).
 
 ### Tunnel Format
@@ -237,7 +237,7 @@ sequenceDiagram
 
 It's a reference to the [Rat Rod](https://en.wikipedia.org/wiki/Rat_rod) car culture, which is all about building something that works, even if it's "rusty".
 
-Essentially, I googled "rusty pipe", and didn;t get much, so I googled "rusty rod", and google figured I meant "rat rod".  I thought it was appropriately esoteric, so I went with it.
+Essentially, I googled "rusty pipe", and didn't get much, so I googled "rusty rod", and google figured I meant "rat rod".  I thought it was appropriately esoteric, so I went with it.
 
 ## Testing
 
