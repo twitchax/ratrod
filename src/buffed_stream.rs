@@ -258,7 +258,21 @@ where
 
         // First, read the encryption flag.
 
-        let is_encrypted = self.inner.read_u8().await.context("Failed to read encryption flag")? == 1;
+        let is_encrypted = match self.inner.read_u8().await {
+            Ok(1) => true,
+            Ok(_) => false,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Ok(ProtocolMessageGuardBuilder {
+                        buffer: Bytes::new(),
+                        inner_builder: |_| ProtocolMessage::Shutdown,
+                    }
+                    .build());
+                } else {
+                    return Err(anyhow!("Failed to read encryption flag: {}", e));
+                }
+            }
+        };
 
         // Next, read the nonce, if the message is encrypted.
 
