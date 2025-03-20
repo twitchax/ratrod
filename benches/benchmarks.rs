@@ -1,5 +1,4 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use futures::SinkExt;
 use ratrodlib::{
     base::{Constant, ExchangeKeyPair, SharedSecret},
     buffed_stream::BuffedDuplexStream,
@@ -16,7 +15,7 @@ pub fn generate_test_shared_secret() -> SharedSecret {
     let ephemeral_key_pair = generate_test_ephemeral_key_pair();
     let challenge = generate_challenge();
 
-    generate_shared_secret(ephemeral_key_pair.private_key, ephemeral_key_pair.public_key.as_ref().try_into().unwrap(), &challenge).unwrap()
+    generate_shared_secret(ephemeral_key_pair.private_key, ephemeral_key_pair.public_key.as_ref(), &challenge).unwrap()
 }
 
 async fn large_data_bench(encrypted: bool) {
@@ -37,10 +36,11 @@ async fn large_data_bench(encrypted: bool) {
     let data = b"Hello, world!";
     let data = data.repeat(1000000);
 
-    client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+    client.push(ProtocolMessage::Data(&data)).await.unwrap();
     client.close().await.unwrap();
 
-    let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+    let guard = server.pull().await.unwrap();
+    let ProtocolMessage::Data(received) = *guard.message() else {
         panic!("Failed to receive message");
     };
 

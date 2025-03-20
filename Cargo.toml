@@ -26,11 +26,12 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "ansi"] }
 ring = { version = "0.17", features = ["std"]}
 base64 = { version = "0.22" }
 futures = { version = "0.3" }
-async-bincode = { version = "0.7" }
 serde = { version = "1", features = ["derive"] }
 homedir = { version = "0.3" }
 secrecy = { version = "0.10" }
 bincode = { version = "2" }
+bytes = { version = "1" }
+ouroboros = { version = "0.18" }
 
 [dev-dependencies]
 pretty_assertions = "1"

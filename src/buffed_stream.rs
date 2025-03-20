@@ -8,74 +8,62 @@
 //! are designed to "transparently" handle encryption and decryption of the data being sent
 //! and received (for the "pump" phase of the lifecycle).
 
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
-
-use anyhow::Context as _;
-use async_bincode::{
-    AsyncDestination,
-    tokio::{AsyncBincodeReader, AsyncBincodeWriter},
-};
-use futures::{Sink, SinkExt, Stream, StreamExt};
+use anyhow::{Context as _, anyhow};
+use bincode::Encode;
+use bytes::{BufMut, Bytes, BytesMut};
 use secrecy::ExposeSecret;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, DuplexStream, ReadHalf, SimplexStream, WriteHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf},
     net::{
         TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
 };
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
     base::{Constant, Res, SharedSecret, Void},
-    protocol::{BincodeReceive, BincodeSend, ProtocolMessage, ProtocolMessageWrapper},
-    utils::{decrypt, encrypt},
+    protocol::{BincodeReceive, BincodeSend, ProtocolMessage, ProtocolMessageGuard, ProtocolMessageGuardBuilder},
+    utils::{decrypt_in_place, encrypt_into},
 };
 
-// Macros.
+// Traits.
 
-/// Macro to take a `Pin<&mut BuffedStream<T>>` and return the inner `Pin<&mut AsyncBincodeStream<T>>`.
-macro_rules! take_pinned_inner {
-    ($self:ident) => {
-        Pin::new(&mut $self.get_mut().inner)
-    };
-}
+/// A trait for splitting a [`BuffedStream`] into its read and write halves.
+pub trait BincodeSplit {
+    type ReadHalf: BincodeReceive;
+    type WriteHalf: BincodeSend;
 
-/// Macro to take the read half.
-macro_rules! take_pinned_inner_read {
-    ($self:ident) => {
-        Pin::new(&mut $self.get_mut().inner_read)
-    };
-}
+    /// Takes and splits the buffered stream into its read and write halves.
+    ///
+    /// This allows the read and write halves to be used independently, potentially
+    /// from different tasks or threads.
+    fn into_split(self) -> (Self::ReadHalf, Self::WriteHalf);
 
-/// Macro to take the write half.
-macro_rules! take_pinned_inner_write {
-    ($self:ident) => {
-        Pin::new(&mut $self.get_mut().inner_write)
-    };
+    /// Splits the buffered stream into mutably borrowed read and write halves.
+    ///
+    /// This allows the read and write halves to be used independently, potentially
+    /// from different tasks or threads.
+    fn split(&mut self) -> (&mut Self::ReadHalf, &mut Self::WriteHalf);
 }
 
 // Types.
 
+/// A type alias for a buffed [`TcpStream`].
 pub type BuffedTcpStream = BuffedStream<OwnedReadHalf, OwnedWriteHalf>;
+/// A type alias for a buffed [`DuplexStream`].
 pub type BuffedDuplexStream = BuffedStream<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>;
 
 /// BuffedStream type.
 ///
 /// This type is a wrapper around a stream that provides buffering and encryption/decryption functionality.
 /// It is used to provide a bincode-centric stream that can be used to send and receive data
-/// in a more efficient manner.
+/// in a more efficient manner.  In order to make _usual_ future splitting more ergonomic, this type
+/// is designed to be a wrapper around the split halves.
 ///
 /// > This type is used to provide a bincode-centric stream that can be used to send and receive data
 /// > so it is inadvisable to use any other methods than the `push` and `pull` methods from the protocol
-/// > module.  Using `read` and `write` directly will bypass the normal logic, and should only be used when
-/// > you know what you are doing (most common use case is pumping data).
-///
-/// The `shared_secret` field is used to encrypt and decrypt data.
-/// The `read_stream` field is used to buffer data that has been decrypted.
+/// > module.
 pub struct BuffedStream<R, W> {
     /// The read half of the buffered stream
     inner_read: BuffedStreamReadHalf<R>,
@@ -91,18 +79,26 @@ impl<R, W> BuffedStream<R, W> {
         let secret_clone = SharedSecret::init_with(|| *shared_secret.expose_secret());
 
         self.inner_read.shared_secret = Some(secret_clone);
-        self.inner_read.read_stream = Some(SimplexStream::new_unsplit(Constant::BUFFER_SIZE));
         self.inner_write.shared_secret = Some(shared_secret);
 
         self
     }
+}
 
-    /// Splits the buffered stream into its read and write halves.
-    ///
-    /// This allows the read and write halves to be used independently, potentially
-    /// from different tasks or threads.
-    pub fn into_split(self) -> (BuffedStreamReadHalf<R>, BuffedStreamWriteHalf<W>) {
+impl<R, W> BincodeSplit for BuffedStream<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    type ReadHalf = BuffedStreamReadHalf<R>;
+    type WriteHalf = BuffedStreamWriteHalf<W>;
+
+    fn into_split(self) -> (Self::ReadHalf, Self::WriteHalf) {
         (self.inner_read, self.inner_write)
+    }
+
+    fn split(&mut self) -> (&mut Self::ReadHalf, &mut Self::WriteHalf) {
+        (&mut self.inner_read, &mut self.inner_write)
     }
 }
 
@@ -136,7 +132,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    pub fn new(inner_read: R, inner_write: W) -> Self {
+    pub fn from_splits(inner_read: R, inner_write: W) -> Self {
         Self {
             inner_read: BuffedStreamReadHalf::new(inner_read),
             inner_write: BuffedStreamWriteHalf::new(inner_write),
@@ -146,21 +142,21 @@ where
 
 impl<R> BuffedStream<R, OwnedWriteHalf> {
     pub fn as_inner_tcp_write_ref(&self) -> &OwnedWriteHalf {
-        self.inner_write.inner.get_ref()
+        &self.inner_write.inner
     }
 
     pub fn as_inner_tcp_write_mut(&mut self) -> &mut OwnedWriteHalf {
-        self.inner_write.inner.get_mut()
+        &mut self.inner_write.inner
     }
 }
 
 impl<W> BuffedStream<OwnedReadHalf, W> {
     pub fn as_inner_tcp_read_ref(&self) -> &OwnedReadHalf {
-        self.inner_read.inner.get_ref()
+        &self.inner_read.inner
     }
 
     pub fn as_inner_tcp_read_mut(&mut self) -> &mut OwnedReadHalf {
-        self.inner_read.inner.get_mut()
+        &mut self.inner_read.inner
     }
 }
 
@@ -175,49 +171,22 @@ impl BuffedStream<OwnedReadHalf, OwnedWriteHalf> {
 
 // Trait impls.
 
-impl<R, W> Stream for BuffedStream<R, W>
-where
-    R: AsyncRead + Unpin,
-    W: Unpin,
-{
-    type Item = std::io::Result<ProtocolMessage>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        take_pinned_inner_read!(self).poll_next(cx)
-    }
-}
-
-impl<R, W> Sink<ProtocolMessage> for BuffedStream<R, W>
+impl<R, W> BincodeSend for BuffedStream<R, W>
 where
     R: Unpin,
     W: AsyncWrite + Unpin,
 {
-    type Error = std::io::Error;
-
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        take_pinned_inner_write!(self).poll_ready(cx)
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: ProtocolMessage) -> Result<(), Self::Error> {
-        take_pinned_inner_write!(self).start_send(item)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        futures::Sink::<ProtocolMessage>::poll_flush(take_pinned_inner_write!(self), cx)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        take_pinned_inner_write!(self).poll_close(cx)
-    }
-}
-
-impl<R, W> BincodeSend for BuffedStream<R, W>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    async fn push(&mut self, message: ProtocolMessage) -> Void {
+    async fn push<E>(&mut self, message: E) -> Void
+    where
+        E: Encode,
+    {
         self.inner_write.push(message).await?;
+
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Void {
+        self.inner_write.close().await?;
 
         Ok(())
     }
@@ -226,81 +195,44 @@ where
 impl<R, W> BincodeReceive for BuffedStream<R, W>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: Unpin,
 {
-    async fn pull(&mut self) -> Res<ProtocolMessage> {
+    async fn pull(&mut self) -> Res<ProtocolMessageGuard> {
         self.inner_read.pull().await
     }
 }
 
 // Split streams.
 
+/// A type for the read half of a buffed stream.
 pub struct BuffedStreamReadHalf<T> {
-    inner: AsyncBincodeReader<T, ProtocolMessageWrapper>,
+    inner: T,
     shared_secret: Option<SharedSecret>,
-    read_stream: Option<SimplexStream>,
+    buffer: BytesMut,
+    decryption_buffer: BytesMut,
 }
 
 impl<T> BuffedStreamReadHalf<T>
 where
     T: AsyncRead + Unpin,
 {
-    fn new(stream: T) -> Self {
+    /// Creates a new `BuffedStreamReadHalf` from the given [`AsyncRead`].
+    fn new(async_read: T) -> Self {
         Self {
-            inner: AsyncBincodeReader::from(stream),
+            inner: async_read,
             shared_secret: None,
-            read_stream: Some(SimplexStream::new_unsplit(Constant::BUFFER_SIZE)),
+            buffer: BytesMut::with_capacity(2 * Constant::BUFFER_SIZE),
+            decryption_buffer: BytesMut::with_capacity(2 * Constant::BUFFER_SIZE),
         }
     }
 
+    /// Takes the inner stream and returns it.
     fn take(self) -> T {
-        if !self.inner.buffer().is_empty() {
+        if !self.buffer.is_empty() {
             warn!("Buffer was not empty when taking the stream");
         }
 
-        self.inner.into_inner()
-    }
-}
-
-impl<T> Stream for BuffedStreamReadHalf<T>
-where
-    T: AsyncRead + Unpin,
-{
-    type Item = std::io::Result<ProtocolMessage>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Get an option to the shared secret.
-        let key = self.shared_secret.as_ref().map(|s| SharedSecret::init_with(|| *s.expose_secret()));
-
-        match take_pinned_inner!(self).poll_next(cx) {
-            Poll::Ready(Some(Ok(wrapper))) => match wrapper {
-                ProtocolMessageWrapper::Plain(message) => Poll::Ready(Some(Ok(message))),
-                ProtocolMessageWrapper::Encrypted { nonce, data } => {
-                    let Some(key) = key else {
-                        return Poll::Ready(Some(Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Received encrypted message without shared secret on this end",
-                        ))));
-                    };
-
-                    let Ok(decrypted_data) = decrypt(&key, &data, &nonce) else {
-                        return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Decryption failed"))));
-                    };
-
-                    let Ok((message, _)) = bincode::decode_from_slice(&decrypted_data, bincode::config::standard()) else {
-                        return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize decrypted data"))));
-                    };
-
-                    Poll::Ready(Some(Ok(message)))
-                }
-            },
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Error on bincode reading during stream next: {}", e),
-            )))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
+        self.inner
     }
 }
 
@@ -308,84 +240,136 @@ impl<T> BincodeReceive for BuffedStreamReadHalf<T>
 where
     T: AsyncRead + Unpin,
 {
-    async fn pull(&mut self) -> Res<ProtocolMessage> {
-        let message = self.next().await;
+    async fn pull(&mut self) -> Res<ProtocolMessageGuard> {
+        // Use reserve here to make sure we have at least the space for the next read.
+        // The `Bytes` go _with_ the returned guard, so we need to make sure we have enough space
+        // for the next read.
+        //
+        // In many cases, the guards may have been dropped, and reserve will not allocate,
+        // but we need to make sure we have enough space for the next read in case they haven't
+        //
+        // In practice, this is used in the pump, so guards are usually dropped within a
+        // few reads, but not after _every_ read (which is why we don't use `try_reclaim` here).
 
-        match message {
-            Some(Ok(message)) => Ok(message),
-            Some(Err(e)) => Err(anyhow::Error::msg(format!("Failed to read message: {}", e))),
-            None => Ok(ProtocolMessage::Shutdown),
+        self.buffer.clear();
+        self.decryption_buffer.clear();
+        self.buffer.reserve(Constant::BUFFER_SIZE);
+        self.decryption_buffer.reserve(Constant::BUFFER_SIZE);
+
+        // First, read the encryption flag.
+
+        let is_encrypted = self.inner.read_u8().await.context("Failed to read encryption flag")? == 1;
+
+        // Next, read the nonce, if the message is encrypted.
+
+        let maybe_encryption_data = if is_encrypted {
+            let mut nonce = [0; Constant::SHARED_SECRET_NONCE_SIZE];
+            self.inner.read_exact(&mut nonce).await.context("Failed to read nonce")?;
+
+            Some(nonce)
+        } else {
+            None
+        };
+
+        // Read the size of the message from the stream.
+
+        let message_size = self.inner.read_u64().await.context("Failed to read size")? as usize;
+
+        // Bail if we got a FIN (?) or a message that is too large.
+
+        if message_size == 0 {
+            let guard = ProtocolMessageGuardBuilder {
+                buffer: Bytes::new(),
+                inner_builder: |_| ProtocolMessage::Shutdown,
+            }
+            .build();
+
+            return Ok(guard);
         }
+
+        if message_size > Constant::BUFFER_SIZE {
+            return Err(anyhow!("Message size is too large for the buffer during pull"));
+        }
+
+        // Read the stream into the buffer.
+
+        // SAFTY: We know _exactly_ how many bytes we are going to read, so we can safely
+        // set the length of the buffer to the size of the message.  However, we check
+        // afterward just to make sure.
+        unsafe { self.buffer.set_len(message_size) };
+        let n = self.inner.read_exact(&mut self.buffer).await?;
+
+        if message_size != n {
+            return Err(anyhow!("Failed to read message: expected {} bytes, got {}", message_size, n));
+        }
+
+        // Split off the needed bytes for the borrowed message.
+
+        let data_buffer = self.buffer.split().freeze();
+
+        // Perform any needed encryption.
+
+        let data_buffer = if let Some(nonce) = maybe_encryption_data {
+            let Some(key) = self.shared_secret.as_ref() else {
+                return Err(anyhow!("Shared secret is not set when receiving encrypted message"));
+            };
+
+            self.decryption_buffer.put(data_buffer);
+
+            // The length is of the buffer is adjusted by this call.
+            decrypt_in_place(key, &nonce, &mut self.decryption_buffer).context("Failed to decrypt message")?;
+
+            self.decryption_buffer.split().freeze()
+        } else {
+            data_buffer
+        };
+
+        // Prepare the result into the guard.
+
+        Ok(ProtocolMessageGuardBuilder {
+            buffer: data_buffer,
+            inner_builder: |data| match bincode::borrow_decode_from_slice::<ProtocolMessage<'_>, _>(data, Constant::BINCODE_CONFIG) {
+                Ok((message, n)) => {
+                    if n != data.len() {
+                        error!("Failed to decrypt message: expected {} bytes, got {}", data.len(), n);
+                        return ProtocolMessage::Shutdown;
+                    }
+
+                    message
+                }
+                Err(e) => {
+                    error!("Failed to decode message: {}", e);
+                    ProtocolMessage::Shutdown
+                }
+            },
+        }
+        .build())
     }
 }
 
+/// A type for the write half of a buffed stream.
 pub struct BuffedStreamWriteHalf<T> {
-    inner: AsyncBincodeWriter<T, ProtocolMessageWrapper, AsyncDestination>,
+    inner: T,
     shared_secret: Option<SharedSecret>,
+    buffer: BytesMut,
 }
 
 impl<T> BuffedStreamWriteHalf<T>
 where
     T: AsyncWrite + Unpin,
 {
-    fn new(stream: T) -> Self {
+    /// Creates a new `BuffedStreamWriteHalf` from the given [`AsyncWrite`].
+    fn new(async_write: T) -> Self {
         Self {
-            inner: AsyncBincodeWriter::from(stream).for_async(),
+            inner: async_write,
             shared_secret: None,
+            buffer: BytesMut::with_capacity(2 * Constant::BUFFER_SIZE),
         }
     }
 
+    /// Takes the inner stream and returns it.
     fn take(self) -> T {
-        self.inner.into_inner()
-    }
-}
-
-impl<T> Sink<ProtocolMessage> for BuffedStreamWriteHalf<T>
-where
-    T: AsyncWrite + Unpin,
-{
-    type Error = std::io::Error;
-
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        take_pinned_inner!(self)
-            .poll_ready(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to make ready inner stream: {}", e)))
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: ProtocolMessage) -> Result<(), Self::Error> {
-        if let Some(key) = self.shared_secret.as_ref() {
-            let encrypted_data = encrypt(
-                key,
-                &bincode::encode_to_vec(&item, bincode::config::standard()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to serialize message"))?,
-            )
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Encryption failed"))?;
-
-            let message = ProtocolMessageWrapper::Encrypted {
-                nonce: encrypted_data.nonce,
-                data: encrypted_data.data,
-            };
-
-            take_pinned_inner!(self)
-                .start_send(message)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write encrypted packet: {}", e)))?;
-
-            return Ok(());
-        }
-
-        take_pinned_inner!(self)
-            .start_send(ProtocolMessageWrapper::Plain(item))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to write plain packet: {}", e)))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        futures::Sink::<ProtocolMessageWrapper>::poll_flush(take_pinned_inner!(self), cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to flush inner stream: {}", e)))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        take_pinned_inner!(self)
-            .poll_close(cx)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to shutdown inner stream: {}", e)))
+        self.inner
     }
 }
 
@@ -393,8 +377,75 @@ impl<T> BincodeSend for BuffedStreamWriteHalf<T>
 where
     T: AsyncWrite + Unpin,
 {
-    async fn push(&mut self, message: ProtocolMessage) -> Void {
-        self.send(message).await?;
+    async fn push<E>(&mut self, message: E) -> Void
+    where
+        E: Encode,
+    {
+        // Restore the buffer to its original state.
+        // We use `try_reclaim` here to avoid allocating a new buffer, and there
+        // _should never be a case where we cannot.  The produced interim `Bytes` are all dropped
+        // at the end of the function, and we currently have a unique mutable borrow, so there cannot
+        // be any other references to the buffer.
+
+        self.buffer.clear();
+        assert!(self.buffer.try_reclaim(2 * Constant::BUFFER_SIZE));
+
+        // Encode the message into the buffer.
+
+        // SAFETY: We know the size of the buffer, and we are going to fill it with
+        // the encoded message.  We also know that the buffer is empty, so we can safely
+        // set the length of the buffer to the size of the message.
+        unsafe { self.buffer.set_len(Constant::BUFFER_SIZE) };
+        let n = bincode::encode_into_slice(message, &mut self.buffer, Constant::BINCODE_CONFIG)?;
+        unsafe { self.buffer.set_len(n) };
+
+        let maybe_nonce = if let Some(key) = self.shared_secret.as_ref() {
+            // This call extends the buffer through `Extend`, so no need to update the length.
+            let nonce = encrypt_into(key, &mut self.buffer).context("Encryption failed")?;
+
+            Some(nonce)
+        } else {
+            None
+        };
+
+        // Ensure the buffer is not empty and is not too large.
+
+        let data_length = self.buffer.len();
+
+        if data_length == 0 {
+            return Err(anyhow!("Buffer is empty"));
+        }
+
+        if data_length > Constant::BUFFER_SIZE {
+            return Err(anyhow!("Buffer is too large"));
+        }
+
+        // Write enryption / nonce.
+
+        if let Some(nonce) = maybe_nonce {
+            self.inner.write_u8(1).await.context("Failed to write encryption flag")?;
+            self.inner.write_all(&nonce).await.context("Failed to write nonce")?;
+        } else {
+            self.inner.write_u8(0).await.context("Failed to write encryption flag")?;
+        }
+
+        // Write the message size.
+
+        self.inner.write_u64(data_length as u64).await.context("Failed to write size")?;
+
+        // Write the data.
+
+        self.inner.write_all(&self.buffer).await?;
+
+        // Flush the stream.
+
+        self.inner.flush().await.context("Failed to flush stream")?;
+
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Void {
+        self.inner.shutdown().await.context("Failed to close stream")?;
 
         Ok(())
     }
@@ -404,8 +455,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::SinkExt;
-
     use crate::{
         protocol::{BincodeReceive, BincodeSend, ProtocolMessage},
         utils::tests::{generate_test_duplex, generate_test_duplex_with_encryption},
@@ -415,12 +464,13 @@ mod tests {
     async fn test_unencrypted_buffed_stream() {
         let (mut client, mut server) = generate_test_duplex();
 
-        let data = b"Hello, world!".to_vec();
+        let data = b"Hello, world!";
 
-        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+        client.push(ProtocolMessage::Data(data)).await.unwrap();
         client.close().await.unwrap();
 
-        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+        let guard = server.pull().await.unwrap();
+        let ProtocolMessage::Data(received) = *guard.message() else {
             panic!("Failed to receive message");
         };
 
@@ -431,12 +481,13 @@ mod tests {
     async fn test_e2e_encrypted_buffed_stream() {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
-        let data = b"Hello, world!".to_vec();
+        let data = b"Hello, world!";
 
-        client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
+        client.push(ProtocolMessage::Data(data)).await.unwrap();
         client.close().await.unwrap();
 
-        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+        let guard = server.pull().await.unwrap();
+        let ProtocolMessage::Data(received) = *guard.message() else {
             panic!("Failed to receive message");
         };
 
@@ -447,75 +498,23 @@ mod tests {
     async fn test_e2e_encrypted_buffed_stream_with_multiple_packets() {
         let (mut client, mut server) = generate_test_duplex_with_encryption();
 
-        let data1 = b"Hello, world!".to_vec();
-        let data2 = b"Hello, wold!".to_vec();
+        let data1 = b"Hello, world!";
+        let data2 = b"Hello, wold!";
 
-        client.push(ProtocolMessage::Data(data1.clone())).await.unwrap();
-        client.push(ProtocolMessage::Data(data2.clone())).await.unwrap();
+        client.push(ProtocolMessage::Data(data1)).await.unwrap();
+        client.push(ProtocolMessage::Data(data2)).await.unwrap();
         client.close().await.unwrap();
 
-        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+        let guard = server.pull().await.unwrap();
+        let ProtocolMessage::Data(received) = *guard.message() else {
             panic!("Failed to receive message");
         };
         assert_eq!(data1, received);
 
-        let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
+        let guard = server.pull().await.unwrap();
+        let ProtocolMessage::Data(received) = *guard.message() else {
             panic!("Failed to receive message");
         };
         assert_eq!(data2, received);
-    }
-
-    #[tokio::test]
-    async fn test_e2e_buffed_stream_with_large_data() {
-        let (mut client, mut server) = generate_test_duplex();
-
-        let data = b"Hello, world!";
-        let data = data.repeat(10000);
-        let data_clone = data.clone();
-
-        let client_task = tokio::spawn(async move {
-            client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
-            client.close().await.unwrap();
-        });
-
-        let server_task = tokio::spawn(async move {
-            let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
-                panic!("Failed to receive message");
-            };
-
-            assert_eq!(data_clone, received);
-        });
-
-        let (result1, result2) = tokio::join!(client_task, server_task);
-
-        result1.unwrap();
-        result2.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_e2e_encrypted_buffed_stream_with_large_data() {
-        let (mut client, mut server) = generate_test_duplex_with_encryption();
-
-        let data = b"Hello, world!";
-        let data = data.repeat(10000);
-        let data_clone = data.clone();
-
-        let client_task = tokio::spawn(async move {
-            client.push(ProtocolMessage::Data(data.clone())).await.unwrap();
-            client.close().await.unwrap();
-        });
-
-        let server_task = tokio::spawn(async move {
-            let ProtocolMessage::Data(received) = server.pull().await.unwrap() else {
-                panic!("Failed to receive message");
-            };
-
-            assert_eq!(data_clone, received);
-        });
-
-        let (result1, result2) = tokio::join!(client_task, server_task);
-
-        result1.unwrap();
-        result2.unwrap();
     }
 }

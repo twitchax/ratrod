@@ -1,24 +1,19 @@
 //! This module implements the server-side of the protocol.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::marker::PhantomData;
 
 use anyhow::Context;
 use regex::Regex;
 use secrecy::SecretString;
-use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
-    select,
-    task::JoinHandle,
-    time::Instant,
-};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{Constant, ExchangeKeyPair, Res, ServerKeyExchangeData, Void},
-    buffed_stream::BuffedTcpStream,
+    base::{ExchangeKeyPair, Res, ServerKeyExchangeData, Void},
+    buffed_stream::{BincodeSplit, BuffedTcpStream},
     protocol::{BincodeReceive, BincodeSend, Challenge, ClientPreamble, ProtocolError, ProtocolMessage, ServerPreamble, Signature},
     security::{resolve_authorized_keys, resolve_keypath, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_tcp_pump, handle_udp_pump, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -73,13 +68,13 @@ impl Instance<ReadyState> {
 /// Verifies the preamble from the client.
 ///
 /// This is used to ensure that the client is allowed to connect to the specified remote.
-async fn verify_client_preamble<T>(stream: &mut T, config: &Config, preamble: &ClientPreamble) -> Res<Signature>
+async fn verify_client_preamble<T>(stream: &mut T, config: &Config, preamble: &ClientPreamble<'_>) -> Res<Signature>
 where
     T: BincodeSend,
 {
     // Validate the remote is OK.
 
-    if !config.remote_regex.is_match(&preamble.remote) {
+    if !config.remote_regex.is_match(preamble.remote) {
         return ProtocolError::InvalidHost(format!("Invalid host from client (supplied `{}`, but need to satisfy `{}`)", preamble.remote, config.remote_regex))
             .send_and_bail(stream)
             .await;
@@ -87,11 +82,12 @@ where
 
     // Sign the challenge.
 
-    let signature = sign_challenge(&preamble.challenge, &config.private_key)?;
+    let signature = sign_challenge(preamble.challenge, &config.private_key)?;
 
     Ok(signature)
 }
 
+/// Sends the server preamble to the client.
 async fn send_server_preamble<T>(stream: &mut T, config: &Config, server_signature: &Signature, server_challenge: &Challenge) -> Res<ExchangeKeyPair>
 where
     T: BincodeSend,
@@ -99,13 +95,13 @@ where
     info!("🚧 Sending handshake challenge to client ...");
 
     let exchange_key_pair = generate_ephemeral_key_pair()?;
-    let exchange_public_key = exchange_key_pair.public_key.as_ref().try_into()?;
+    let exchange_public_key = exchange_key_pair.public_key.as_ref();
 
     let preamble = ServerPreamble {
-        challenge: *server_challenge,
+        challenge: server_challenge,
         exchange_public_key,
-        identity_public_key: config.public_key.clone(),
-        signature: server_signature.into(),
+        identity_public_key: &config.public_key,
+        signature: server_signature,
     };
 
     stream.push(ProtocolMessage::ServerPreamble(preamble)).await?;
@@ -123,18 +119,19 @@ where
 {
     // Wait for the client to respond.
 
-    let ProtocolMessage::ClientAuthentication(client_authentication) = stream.pull().await?.fail_if_error()? else {
+    let guard = stream.pull().await?;
+    let ProtocolMessage::ClientAuthentication(client_authentication) = guard.message().fail_if_error()? else {
         return ProtocolError::InvalidKey("Invalid handshake response".into()).send_and_bail(stream).await;
     };
 
     // Verify the signature.
 
-    if validate_signed_challenge(server_challenge, &client_authentication.signature.into(), &client_authentication.identity_public_key).is_err() {
+    if validate_signed_challenge(server_challenge, client_authentication.signature, client_authentication.identity_public_key).is_err() {
         return ProtocolError::InvalidKey("Invalid challenge signature from client".into()).send_and_bail(stream).await;
     }
 
     // Validate that the key is authorized.
-    if !config.authorized_keys.contains(&client_authentication.identity_public_key) {
+    if !config.authorized_keys.iter().any(|k| k == client_authentication.identity_public_key) {
         return ProtocolError::InvalidKey("Unauthorized key from client".into()).send_and_bail(stream).await;
     }
 
@@ -166,17 +163,28 @@ where
 /// It verifies the preamble, handles the key challenge, and completes the handshake.
 async fn handle_handshake<T>(stream: &mut T, config: &Config) -> Res<ServerKeyExchangeData>
 where
-    T: BincodeReceive + BincodeSend,
+    T: BincodeSplit + BincodeReceive + BincodeSend,
 {
+    let (read, write) = stream.split();
+
     // Ingest the preamble from the client.
 
-    let ProtocolMessage::ClientPreamble(preamble) = stream.pull().await? else {
+    let guard = read.pull().await?;
+    let ProtocolMessage::ClientPreamble(preamble) = guard.message() else {
         return ProtocolError::Unknown("Invalid handshake start".into()).send_and_bail(stream).await;
     };
 
+    // Extract the preamble ta so the borrows into the stream can be dropped.
+
+    let client_exchange_public_key = preamble.exchange_public_key.try_into()?;
+    let client_challenge = preamble.challenge.try_into()?;
+    let requested_remote_address = preamble.remote.into();
+    let requested_should_encrypt = preamble.should_encrypt;
+    let requested_is_udp = preamble.is_udp;
+
     // Verify the preamble.
 
-    let server_signature = verify_client_preamble(stream, config, &preamble).await?;
+    let server_signature = verify_client_preamble(write, config, preamble).await?;
 
     // Create a challenge.
 
@@ -184,7 +192,7 @@ where
 
     // Send the server preamble.
 
-    let local_exchange_key_pair = send_server_preamble(stream, config, &server_signature, &server_challenge).await?;
+    let local_exchange_key_pair = send_server_preamble(write, config, &server_signature, &server_challenge).await?;
 
     // Validate the client's auth response.
 
@@ -195,13 +203,13 @@ where
     complete_handshake(stream).await?;
 
     Ok(ServerKeyExchangeData {
-        client_exchange_public_key: preamble.exchange_public_key,
-        client_challenge: preamble.challenge,
+        client_exchange_public_key,
+        client_challenge,
         local_exchange_private_key: local_exchange_key_pair.private_key,
         local_challenge: server_challenge,
-        requested_remote_address: preamble.remote,
-        requested_should_encrypt: preamble.should_encrypt,
-        requested_is_udp: preamble.is_udp,
+        requested_remote_address,
+        requested_should_encrypt,
+        requested_is_udp,
     })
 }
 
@@ -217,15 +225,13 @@ async fn run_tcp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    handle_pump(remote, client).await.context("Error handling TCP pump.")?;
+    handle_tcp_pump(remote, client).await.context("Error handling TCP pump.")?;
 
     Ok(())
 }
 
 /// Runs the pump with a UDP-connected remote.
 async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void {
-    // Attempt to connect to the remote address (should only fail in weird circumstances).
-
     let remote = UdpSocket::bind("127.0.0.1:0").await.context("Error binding UDP socket")?;
     if remote.connect(remote_address).await.is_err() {
         return ProtocolError::RemoteFailed(format!("Failed to connect to remote `{}`", remote_address))
@@ -235,66 +241,7 @@ async fn run_udp_pump(mut client: BuffedTcpStream, remote_address: &str) -> Void
 
     info!("✅ Connected to remote server `{}`.", remote_address);
 
-    // Split the client connection into a read and write half.
-    let (mut client_read, mut client_write) = client.into_split();
-
-    // Split the remote connection into a read and write half (just requires `Arc`ing, since the UDP send / receive does not require `&mut`).
-    let remote_up = Arc::new(remote);
-    let remote_down = remote_up.clone();
-
-    // Run the pumps.
-
-    let last_activity = Arc::new(tokio::sync::Mutex::new(Instant::now()));
-    let last_activity_up = last_activity.clone();
-    let last_activity_down = last_activity.clone();
-
-    let pump_up: JoinHandle<Void> = tokio::spawn(async move {
-        while let ProtocolMessage::UdpData(data) = client_read.pull().await? {
-            remote_up.send(&data).await?;
-            *last_activity_up.lock().await = Instant::now();
-        }
-
-        Ok(())
-    });
-
-    let pump_down: JoinHandle<Void> = tokio::spawn(async move {
-        let mut buf = [0; Constant::BUFFER_SIZE];
-
-        loop {
-            let size = remote_down.recv(&mut buf).await?;
-            client_write.push(ProtocolMessage::UdpData(buf[..size].to_vec())).await?;
-            *last_activity_down.lock().await = Instant::now();
-        }
-    });
-
-    let timeout: JoinHandle<Void> = tokio::spawn(async move {
-        loop {
-            let last_activity = *last_activity.lock().await;
-
-            if last_activity.elapsed() > Constant::TIMEOUT {
-                info!("✅ UDP connection timed out (assumed graceful close).");
-                return Ok(());
-            }
-
-            tokio::time::sleep(Constant::TIMEOUT).await;
-        }
-    });
-
-    // Wait for the pumps to finish.  This employs a "last activity" type timeout, and uses `select!` to break
-    // out of the loop if any of the pumps finish.  In general, the UDP side to the remote will not close,
-    // but the client may break the pipe, so we need to handle that.
-    // The `select!` macro will return the first result that completes,
-    // and the `timeout` will return if the last activity is too long ago.
-
-    let result = select! {
-        r = pump_up => r?,
-        r = pump_down => r?,
-        r = timeout => r?,
-    };
-
-    // Check for errors.
-
-    result?;
+    handle_udp_pump(remote, client).await.context("Error handling UDP pump.")?;
 
     Ok(())
 }
@@ -453,9 +400,9 @@ mod tests {
         // Client sends preamble
         let client_challenge: Challenge = [8u8; 32];
         let client_preamble = ClientPreamble {
-            remote: "localhost".to_string(),
-            challenge: client_challenge,
-            exchange_public_key: generate_test_fake_exchange_public_key(),
+            remote: "localhost",
+            challenge: &client_challenge,
+            exchange_public_key: &generate_test_fake_exchange_public_key(),
             should_encrypt: true,
             is_udp: false,
         };
@@ -465,24 +412,24 @@ mod tests {
         // Client prepares to respond to server's challenge
         let client_handle = tokio::spawn(async move {
             // Get server preamble
-            let message = client.pull().await.unwrap();
-            let server_challenge = match message {
+            let guard = client.pull().await.unwrap();
+            let server_challenge = match guard.message() {
                 ProtocolMessage::ServerPreamble(preamble) => preamble.challenge,
-                _ => panic!("Expected ServerPreamble message, got: {:?}", message),
+                _ => panic!("Expected ServerPreamble message, got: {:?}", guard.message()),
             };
 
             // Send client authentication
-            let signature = sign_challenge(&server_challenge, &client_config.private_key).unwrap();
+            let signature = sign_challenge(server_challenge, &client_config.private_key).unwrap();
             let client_auth = ClientAuthentication {
-                identity_public_key: client_config.public_key,
-                signature: signature.into(),
+                identity_public_key: &client_config.public_key,
+                signature: &signature,
             };
 
             client.push(ProtocolMessage::ClientAuthentication(client_auth)).await.unwrap();
 
             // Verify handshake completion
-            let message = client.pull().await.unwrap();
-            assert!(matches!(message, ProtocolMessage::HandshakeCompletion));
+            let guard = client.pull().await.unwrap();
+            assert!(matches!(guard.message(), ProtocolMessage::HandshakeCompletion));
         });
 
         // Execute handshake on server side
@@ -518,11 +465,11 @@ mod tests {
         assert!(result.is_err());
 
         // Verify client received error
-        let message = client.pull().await.unwrap();
-        if let ProtocolMessage::Error(error) = message {
-            assert_eq!(error, ProtocolError::Unknown("Invalid handshake start".into()));
+        let guard = client.pull().await.unwrap();
+        if let ProtocolMessage::Error(error) = guard.message() {
+            assert_eq!(error, &ProtocolError::Unknown("Invalid handshake start".into()));
         } else {
-            panic!("Expected error message, got: {:?}", message);
+            panic!("Expected error message, got: {:?}", guard.message());
         }
     }
 
@@ -535,9 +482,9 @@ mod tests {
 
         // Send preamble with non-matching host
         let client_preamble = ClientPreamble {
-            remote: "different-host".to_string(),
-            challenge: [9u8; 32],
-            exchange_public_key: generate_test_fake_exchange_public_key(),
+            remote: "different-host",
+            challenge: &[9u8; 32],
+            exchange_public_key: &generate_test_fake_exchange_public_key(),
             should_encrypt: false,
             is_udp: false,
         };
@@ -551,11 +498,11 @@ mod tests {
         assert!(result.is_err());
 
         // Verify client received error
-        let message = client.pull().await.unwrap();
-        if let ProtocolMessage::Error(error) = message {
+        let guard = client.pull().await.unwrap();
+        if let ProtocolMessage::Error(error) = guard.message() {
             assert!(matches!(error, ProtocolError::InvalidHost(_)));
         } else {
-            panic!("Expected error message, got: {:?}", message);
+            panic!("Expected error message, got: {:?}", guard.message());
         }
     }
 
@@ -567,9 +514,9 @@ mod tests {
 
         // Client sends preamble
         let client_preamble = ClientPreamble {
-            remote: "localhost".to_string(),
-            challenge: [10u8; 32],
-            exchange_public_key: generate_test_fake_exchange_public_key(),
+            remote: "localhost",
+            challenge: &[10u8; 32],
+            exchange_public_key: &generate_test_fake_exchange_public_key(),
             should_encrypt: false,
             is_udp: false,
         };
@@ -583,24 +530,24 @@ mod tests {
         // Client responds with unauthorized key
         let client_handle = tokio::spawn(async move {
             // Get server preamble
-            let message = client.pull().await.unwrap();
-            let server_challenge = match message {
+            let guard = client.pull().await.unwrap();
+            let server_challenge = match guard.message() {
                 ProtocolMessage::ServerPreamble(preamble) => preamble.challenge,
-                _ => panic!("Expected ServerPreamble message, got: {:?}", message),
+                _ => panic!("Expected ServerPreamble message, got: {:?}", guard.message()),
             };
 
             // Send client authentication with unauthorized key
-            let signature = sign_challenge(&server_challenge, &unauthorized_private_key).unwrap();
+            let signature = sign_challenge(server_challenge, &unauthorized_private_key).unwrap();
             let client_auth = ClientAuthentication {
-                identity_public_key: unauthorized_key_pair.public_key,
-                signature: signature.into(),
+                identity_public_key: &unauthorized_key_pair.public_key,
+                signature: &signature,
             };
 
             client.push(ProtocolMessage::ClientAuthentication(client_auth)).await.unwrap();
 
             // Check for error response
-            let message = client.pull().await.unwrap();
-            assert!(matches!(message, ProtocolMessage::Error(_)));
+            let guard = client.pull().await.unwrap();
+            assert!(matches!(guard.message(), &ProtocolMessage::Error(_)));
         });
 
         // Execute handshake on server side

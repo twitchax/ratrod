@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use base64::{engine::GeneralPurpose, prelude::BASE64_URL_SAFE_NO_PAD};
+use bincode::config::BigEndian;
 use ring::{
     aead::{self, CHACHA20_POLY1305},
     agreement::{EphemeralPrivateKey, PublicKey},
@@ -24,24 +25,39 @@ pub type Void = Res<()>;
 pub struct Constant;
 
 impl Constant {
+    /// The AEAD algorithm used for encryption.
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
+    /// The alrgorithm used for key agreement.
     pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
+    /// Thedefault base4 engine used for encoding and decoding keys.
     pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
-    pub const BUFFER_SIZE: usize = 8 * 1024 - Constant::ENCRYPTION_OVERHEAD;
+    /// The default bincode engine used for encoding and decoding data across data streams.
+    pub const BINCODE_CONFIG: bincode::config::Configuration<BigEndian> = bincode::config::standard().with_big_endian();
+    /// The default buffer size (defaulting to extra large for now).
+    pub const BUFFER_SIZE: usize = 128 * 1024 - Constant::ENCRYPTION_OVERHEAD;
+    /// The size of a signature challenge.
     pub const CHALLENGE_SIZE: usize = 32;
-    pub const DELIMITER: &[u8] = b"\xAA\xAB\xAC\xAD\xAE\xAF\xBA\xBB";
-    pub const DELIMITER_SIZE: usize = 8;
+    /// The size of the encryption overhead.
     pub const ENCRYPTION_OVERHEAD: usize = 256;
+    /// The size of a key exchange public key.
+    pub const EXCHANGE_PUBLIC_KEY_SIZE: usize = 32;
+    /// The base64 encoded size of a key exchange private key.
     pub const IDENTITY_PRIVATE_KEY_LENGTH: usize = 111;
+    /// The base64 encoded size of a key exchange public key.
     pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 43;
+    /// The algorithm used to produce the shared secret of the key exchange.
     pub const KDF: hkdf::Algorithm = HKDF_SHA256;
-    pub const NULL_PEER_PUBLIC_KEY: ExchangePublicKey = [0; Self::PEER_PUBLIC_KEY_SIZE];
-    pub const PEER_PUBLIC_KEY_SIZE: usize = 32;
+    /// The size of the shared secret nonce.
     pub const SHARED_SECRET_NONCE_SIZE: usize = 12;
+    /// The size of the shared secret.
     pub const SHARED_SECRET_SIZE: usize = 32;
+    /// The size of the shared secret encryption tag.
     pub const SHARED_SECRET_TAG_SIZE: usize = 16;
+    /// The type of signature used for the handshake.
     pub const SIGNATURE: &'static ring::signature::EdDSAParameters = &ring::signature::ED25519;
+    /// The size of the signature used for the handshake.
     pub const SIGNATURE_SIZE: usize = 64;
+    /// The default timeout for the stale connections.
     pub const TIMEOUT: Duration = Duration::from_secs(120);
 }
 

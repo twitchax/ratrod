@@ -4,7 +4,8 @@
 
 use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, sync::Arc};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
+use bytes::{Bytes, BytesMut};
 use futures::join;
 use secrecy::SecretString;
 use tokio::{
@@ -19,11 +20,11 @@ use tokio::{
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
-    base::{ClientHandshakeData, ClientKeyExchangeData, Constant, Err, Res, TunnelDefinition, Void},
-    buffed_stream::BuffedTcpStream,
-    protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ExchangePublicKey, ProtocolMessage},
+    base::{ClientHandshakeData, ClientKeyExchangeData, Constant, Res, TunnelDefinition, Void},
+    buffed_stream::{BincodeSplit, BuffedTcpStream},
+    protocol::{BincodeReceive, BincodeSend, Challenge, ClientAuthentication, ClientPreamble, ProtocolMessage},
     security::{resolve_keypath, resolve_known_hosts, resolve_private_key, resolve_public_key},
-    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
+    utils::{generate_challenge, generate_ephemeral_key_pair, generate_shared_secret, handle_tcp_pump, parse_tunnel_definitions, random_string, sign_challenge, validate_signed_challenge},
 };
 
 // State machine.
@@ -94,8 +95,8 @@ impl Instance<ReadyState> {
             })
             .collect::<Vec<_>>();
 
-        // Basically, only crash if _all_ of the servers fail to start.  Otherwise, the user can use the error logs to see that some of the
-        // servers failed to start.  As a result, we _do not_ log an error, since the user can see the errors in the logs.
+        // Only exit if _all_ of the servers fail to start.  Otherwise, the user can use the error logs to see that some of the
+        // servers failed to start.  As a result, we _do not_ return an error, since the user can see the errors in the logs.
         futures::future::join_all(tasks).await;
 
         Ok(())
@@ -108,17 +109,25 @@ impl Instance<ReadyState> {
 ///
 /// This is the first message sent to the server. It contains the remote address and the peer public key
 /// for the future key exchange.
-async fn send_preamble<T, R>(stream: &mut T, config: &Config, remote_address: R, exchange_public_key: ExchangePublicKey, is_udp: bool) -> Res<Challenge>
+async fn send_preamble<T, R>(stream: &mut T, config: &Config, remote_address: R, exchange_public_key: &[u8], is_udp: bool) -> Res<Challenge>
 where
     T: BincodeSend,
-    R: Into<String>,
+    R: AsRef<str>,
 {
+    if exchange_public_key.len() != Constant::EXCHANGE_PUBLIC_KEY_SIZE {
+        return Err(anyhow!(
+            "Invalid exchange public key size: expected {} bytes, got {} bytes",
+            Constant::EXCHANGE_PUBLIC_KEY_SIZE,
+            exchange_public_key.len()
+        ));
+    }
+
     let challenge = generate_challenge();
 
     let preamble = ClientPreamble {
         exchange_public_key,
-        remote: remote_address.into(),
-        challenge,
+        remote: remote_address.as_ref(),
+        challenge: &challenge,
         should_encrypt: config.should_encrypt,
         is_udp,
     };
@@ -140,53 +149,57 @@ where
 {
     // Wait for the server's preamble.
 
-    let ProtocolMessage::ServerPreamble(server_preamble) = stream.pull().await? else {
-        return Err(Err::msg("Handshake failed: improper message type (expected handshake challenge)"));
+    let guard = stream.pull().await?;
+    let ProtocolMessage::ServerPreamble(server_preamble) = guard.message() else {
+        return Err(anyhow!("Handshake failed: improper message type (expected handshake challenge)"));
+    };
+
+    let result = ClientHandshakeData {
+        server_challenge: server_preamble.challenge.try_into()?,
+        server_exchange_public_key: server_preamble.exchange_public_key.try_into()?,
     };
 
     // Validate the server's signature.
 
-    validate_signed_challenge(client_challenge, &server_preamble.signature.into(), &server_preamble.identity_public_key)?;
+    validate_signed_challenge(client_challenge, server_preamble.signature, server_preamble.identity_public_key)?;
 
     info!("✅ Server's signature validated with public key `{}` ...", server_preamble.identity_public_key);
 
     // Ensure that the server is in the `known_hosts` file.
 
-    if !config.accept_all_hosts && !config.known_hosts.contains(&server_preamble.identity_public_key) {
+    if !config.accept_all_hosts && !config.known_hosts.iter().any(|k| k == server_preamble.identity_public_key) {
         // Client doesn't really need to tell the server about failures, so will error and break the pipe.
-        return Err(Err::msg(format!("Server's public key `{}` is not in the known hosts file", server_preamble.identity_public_key)));
+        return Err(anyhow!("Server's public key `{}` is not in the known hosts file", server_preamble.identity_public_key));
     }
 
     info!("🚧 Signing server challenge ...");
 
-    let client_signature = sign_challenge(&server_preamble.challenge, &config.private_key)?;
+    let client_signature = sign_challenge(server_preamble.challenge, &config.private_key)?;
     let client_authentication = ClientAuthentication {
-        identity_public_key: config.public_key.clone(),
-        signature: client_signature.into(),
+        identity_public_key: &config.public_key,
+        signature: &client_signature,
     };
     stream.push(ProtocolMessage::ClientAuthentication(client_authentication)).await?;
 
     info!("⏳ Awaiting challenge validation ...");
 
-    let ProtocolMessage::HandshakeCompletion = stream.pull().await?.fail_if_error()? else {
-        return Err(Err::msg("Handshake failed: improper message type (expected handshake completion)"));
+    let guard = stream.pull().await?;
+    let ProtocolMessage::HandshakeCompletion = guard.message().fail_if_error()? else {
+        return Err(anyhow!("Handshake failed: improper message type (expected handshake completion)"));
     };
 
-    Ok(ClientHandshakeData {
-        server_challenge: server_preamble.challenge,
-        server_exchange_public_key: server_preamble.exchange_public_key,
-    })
+    Ok(result)
 }
 
 /// Handles the handshake with the server.
 async fn handle_handshake<T, R>(stream: &mut T, config: &Config, remote_address: R, is_udp: bool) -> Res<ClientKeyExchangeData>
 where
     T: BincodeSend + BincodeReceive,
-    R: Into<String>,
+    R: AsRef<str>,
 {
     // If we want to request encryption, we need to generate an ephemeral key pair, and send the public key to the server.
     let exchange_key_pair = generate_ephemeral_key_pair()?;
-    let exchange_public_key = exchange_key_pair.public_key.as_ref().try_into().map_err(|_| Err::msg("Could not convert peer public key to array"))?;
+    let exchange_public_key = exchange_key_pair.public_key.as_ref();
 
     let client_challenge = send_preamble(stream, config, remote_address, exchange_public_key, is_udp).await?;
     let handshake_data = handle_challenge(stream, config, &client_challenge).await?;
@@ -284,7 +297,7 @@ async fn handle_tcp(local: TcpStream, remote_address: String, config: Config) {
 
         local.set_nodelay(true)?;
 
-        handle_pump(local, server).await.context("Error handling pump")?;
+        handle_tcp_pump(local, server).await.context("Error handling pump")?;
 
         info!("✅ Connection closed.");
 
@@ -318,21 +331,26 @@ async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
             tunnel_definition.bind_address, config.connect_address, tunnel_definition.remote_address
         );
 
-        let clients = Arc::new(Mutex::new(HashMap::<SocketAddr, UnboundedSender<Vec<u8>>>::new()));
+        let clients = Arc::new(Mutex::new(HashMap::<SocketAddr, UnboundedSender<Bytes>>::new()));
+        let mut buffer = BytesMut::with_capacity(2 * Constant::BUFFER_SIZE);
 
         loop {
-            // Receive a datagram.
+            // Clear and reclaim the bufer.
+            buffer.clear();
+            buffer.reserve(Constant::BUFFER_SIZE);
 
-            // TODO: _technically_, this could be up to 65,507 bytes, but that would be a bit silly, so 8 KB should be fine (since most systems use the MTU of 1500).
-            let mut buf = vec![0; Constant::BUFFER_SIZE];
-            let (read, addr) = socket.recv_from(&mut buf).await?;
-            buf.truncate(read);
+            // Receive a datagram.
+            unsafe { buffer.set_len(Constant::BUFFER_SIZE) };
+            let (read, addr) = socket.recv_from(&mut buffer).await?;
+            unsafe { buffer.set_len(read) };
+
+            let data = buffer.split().freeze();
 
             // Handle the packet.
 
             if let Some(data_sender) = clients.lock().await.get_mut(&addr) {
                 // In the case where we already have a connection, we should push the message into the channel.
-                data_sender.send(buf)?;
+                data_sender.send(data)?;
             } else {
                 // In this case, we need to create a new connection.
                 let socket_clone = socket.clone();
@@ -340,7 +358,7 @@ async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
 
                 // Create a new channel for the client.
                 let (data_sender, data_receiver) = tokio::sync::mpsc::unbounded_channel();
-                data_sender.send(buf)?;
+                data_sender.send(data)?;
                 clients.lock().await.insert(addr, data_sender);
 
                 // Spawn a new task to handle the connection.
@@ -364,7 +382,7 @@ async fn run_udp_server(tunnel_definition: TunnelDefinition, config: Config) {
 }
 
 /// Handles a new UDP connection.
-async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data_receiver: UnboundedReceiver<Vec<u8>>, remote_address: String, config: Config) {
+async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data_receiver: UnboundedReceiver<Bytes>, remote_address: String, config: Config) {
     let id = random_string(6);
     let span = info_span!("udp", id = id);
 
@@ -385,15 +403,21 @@ async fn handle_udp(address: SocketAddr, client_socket: Arc<UdpSocket>, mut data
 
         let pump_up: JoinHandle<Void> = tokio::spawn(async move {
             while let Some(data) = data_receiver.recv().await {
-                remote_write.push(ProtocolMessage::UdpData(data.to_vec())).await?;
+                dbg!("client up {}", String::from_utf8_lossy(&data));
+                remote_write.push(ProtocolMessage::UdpData(&data)).await?;
             }
 
             Ok(())
         });
 
         let pump_down: JoinHandle<Void> = tokio::spawn(async move {
-            while let ProtocolMessage::UdpData(data) = remote_read.pull().await? {
-                client_socket_clone.send_to(&data, &address).await?;
+            loop {
+                let guard = remote_read.pull().await?;
+                let ProtocolMessage::UdpData(data) = guard.message() else {
+                    break;
+                };
+
+                client_socket_clone.send_to(data, &address).await?;
             }
 
             Ok(())
@@ -541,13 +565,12 @@ pub mod tests {
         let (mut client, mut server) = generate_test_duplex();
         let config = generate_test_client_config();
         let remote_address = "remote_address:3000";
-        let exchange_public_key = generate_test_fake_exchange_public_key();
+        let exchange_public_key = &generate_test_fake_exchange_public_key();
 
         let client_challenge = send_preamble(&mut client, &config, remote_address, exchange_public_key, false).await.unwrap();
 
-        let received = server.pull().await.unwrap();
-
-        match received {
+        let guard = server.pull().await.unwrap();
+        match guard.message() {
             ProtocolMessage::ClientPreamble(preamble) => {
                 assert_eq!(preamble.remote, remote_address);
                 assert_eq!(preamble.exchange_public_key, exchange_public_key);
@@ -568,10 +591,10 @@ pub mod tests {
         tokio::spawn(async move {
             // Create and send ServerPreamble with unknown key
             let preamble = crate::protocol::ServerPreamble {
-                identity_public_key: bad_key,
-                signature: [0u8; 64].into(), // Mock signature
-                challenge: generate_challenge(),
-                exchange_public_key: generate_test_fake_exchange_public_key(),
+                identity_public_key: &bad_key,
+                signature: &[0u8; 64], // Mock signature
+                challenge: &generate_challenge(),
+                exchange_public_key: &generate_test_fake_exchange_public_key(),
             };
 
             server.push(ProtocolMessage::ServerPreamble(preamble)).await.unwrap();

@@ -6,8 +6,9 @@
 #![feature(coverage_attribute)]
 #![feature(const_type_name)]
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
-use ratrodlib::base::{Err, Void};
+use ratrodlib::base::Void;
 use ratrodlib::security::ensure_security_files;
 use tracing::error;
 
@@ -53,7 +54,7 @@ async fn execute_command(key_path: Option<String>, command: Option<Command>) -> 
             ratrodlib::connect::Instance::prepare(key_path, server, &tunnel, accept_all_hosts, encrypt)?.start().await?;
         }
         None => {
-            return Err(Err::msg("No command specified."));
+            return Err(anyhow!("No command specified."));
         }
     };
 

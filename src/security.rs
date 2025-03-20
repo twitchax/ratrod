@@ -4,12 +4,12 @@
 
 use std::io::Write;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use secrecy::SecretString;
 use tracing::info;
 
 use crate::{
-    base::{Err, Res, Void},
+    base::{Res, Void},
     utils,
 };
 
@@ -17,7 +17,7 @@ use crate::{
 pub fn get_home() -> Res<String> {
     let home = homedir::my_home()
         .context("Failed to get home directory.")?
-        .ok_or_else(|| Err::msg("Failed to get home directory."))?
+        .ok_or_else(|| anyhow!("Failed to get home directory."))?
         .to_string_lossy()
         .to_string();
 
@@ -93,7 +93,7 @@ where
         let input = input.trim().to_lowercase();
 
         if input != "y" {
-            return Err(Err::msg("User declined to generate security files."));
+            return Err(anyhow!("User declined to generate security files."));
         }
 
         info!("Generating security files ...");
