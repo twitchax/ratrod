@@ -7,6 +7,10 @@ description = "A TCP / UDP tunneler that uses public / private key authenticatio
 license = "MIT"
 repository = "https://github.com/twitchax/ratrod"
 
+[profile.release]
+codegen-units = 1
+lto = true
+
 [lib]
 name = "ratrodlib"
 path = "src/lib.rs"
