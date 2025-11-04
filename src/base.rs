@@ -27,9 +27,9 @@ pub struct Constant;
 impl Constant {
     /// The AEAD algorithm used for encryption.
     pub const AEAD: &'static aead::Algorithm = &CHACHA20_POLY1305;
-    /// The alrgorithm used for key agreement.
+    /// The algorithm used for key agreement.
     pub const AGREEMENT: &'static ring::agreement::Algorithm = &ring::agreement::X25519;
-    /// Thedefault base4 engine used for encoding and decoding keys.
+    /// The default base64 engine used for encoding and decoding keys.
     pub const BASE64_ENGINE: GeneralPurpose = BASE64_URL_SAFE_NO_PAD;
     /// The default bincode engine used for encoding and decoding data across data streams.
     pub const BINCODE_CONFIG: bincode::config::Configuration<BigEndian> = bincode::config::standard().with_big_endian();
