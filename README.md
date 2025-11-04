@@ -177,7 +177,7 @@ $ chmod a+x /usr/local/bin/ratrod
 Linux:
 
 ```bash
-$ curl -LO https://github.com/twitchax/ratrod/releases/latest/downloadratrod_x86_64-unknown-linux-gnu.zip
+$ curl -LO https://github.com/twitchax/ratrod/releases/latest/download/ratrod_x86_64-unknown-linux-gnu.zip
 $ unzip ratrod_x86_64-unknown-linux-gnu.zip -d /usr/local/bin
 $ chmod a+x /usr/local/bin/ratrod
 ```
