@@ -38,6 +38,7 @@ jobs:
     needs: test
     name: Build Linux
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -52,6 +53,7 @@ jobs:
     needs: test
     name: Build Windows
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - name: Install mingw-w64
@@ -74,6 +76,7 @@ jobs:
     name: Build MacOS
     # TODO: Eventually, it would be better to cross-compile with `aarch64-apple-darwin`.
     runs-on: macos-15
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
